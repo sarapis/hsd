@@ -31,3 +31,8 @@ new_sqlite_classes = ["DirectoryMcpAgent"]
 # Cron trigger for Airtable sync (every 15 minutes)
 [triggers]
 crons = ["*/15 * * * *"]
+
+# Custom domain — allows WAF/bot-protection tuning unlike *.workers.dev
+[[routes]]
+pattern = "services-api.wegov.nyc/*"
+zone_name = "wegov.nyc"

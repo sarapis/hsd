@@ -8,7 +8,7 @@ import type { Env } from "../env";
 import {
   mapOrganizationSummary, mapOrganization, mapServiceSummary,
   mapLocation, mapAddress, mapPhone, mapContact, mapProgram, mapFunding,
-  paginate,
+  paginate, toUuid,
 } from "../mapper";
 
 const organizations = new Hono<{ Bindings: Env }>();
@@ -151,11 +151,25 @@ organizations.get("/:id/services", async (c) => {
 organizations.get("/:id", async (c) => {
   const db = c.env.DB;
   const orgId = c.req.param("id");
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(orgId);
 
-  const row = await db
+  let row = await db
     .prepare("SELECT id, data FROM organizations WHERE id = ?1 OR airtable_id = ?1")
     .bind(orgId)
     .first<{ id: string; data: string }>();
+
+  // UUID reverse-lookup: scan all orgs to find the one whose toUuid matches.
+  if (!row && isUuid) {
+    const { results: allRows } = await db
+      .prepare("SELECT id, data FROM organizations")
+      .all<{ id: string; data: string }>();
+    for (const candidate of allRows) {
+      if (toUuid(candidate.id) === orgId.toLowerCase()) {
+        row = candidate;
+        break;
+      }
+    }
+  }
 
   if (!row) return c.json({ detail: "Organization not found" }, 404);
 

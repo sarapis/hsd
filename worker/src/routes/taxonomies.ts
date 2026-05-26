@@ -5,7 +5,7 @@
  */
 import { Hono } from "hono";
 import type { Env } from "../env";
-import { mapTaxonomy, mapTaxonomyTerm, paginate } from "../mapper";
+import { mapTaxonomy, mapTaxonomyTerm, paginate, toUuid } from "../mapper";
 
 const taxonomies = new Hono<{ Bindings: Env }>();
 
@@ -45,11 +45,24 @@ taxonomies.get("/", async (c) => {
 taxonomies.get("/:id", async (c) => {
   const db = c.env.DB;
   const taxId = c.req.param("id");
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taxId);
 
-  const row = await db
+  let row = await db
     .prepare("SELECT id, data FROM taxonomies WHERE id = ?1 OR airtable_id = ?1")
     .bind(taxId)
     .first<{ id: string; data: string }>();
+
+  if (!row && isUuid) {
+    const { results: allRows } = await db
+      .prepare("SELECT id, data FROM taxonomies")
+      .all<{ id: string; data: string }>();
+    for (const candidate of allRows) {
+      if (toUuid(candidate.id) === taxId.toLowerCase()) {
+        row = candidate;
+        break;
+      }
+    }
+  }
 
   if (!row) return c.json({ detail: "Taxonomy not found" }, 404);
 
@@ -95,25 +108,25 @@ taxonomyTerms.get("/", async (c) => {
     .bind(...params)
     .all<{ id: string; taxonomy_id: string; data: string }>();
 
-  const items = [];
-  for (const row of results) {
+  // Batch-load all taxonomies upfront (avoids N+1 query per term).
+  const { results: taxRows } = await db
+    .prepare("SELECT id, airtable_id, data FROM taxonomies")
+    .all<{ id: string; airtable_id: string; data: string }>();
+  const taxMap = new Map<string, Record<string, unknown>>();
+  for (const t of taxRows) {
+    const d = JSON.parse(t.data) as Record<string, unknown>;
+    d.id = t.id;
+    taxMap.set(t.id, d);
+    if (t.airtable_id) taxMap.set(t.airtable_id, d);
+  }
+
+  const items = results.map((row) => {
     const data = JSON.parse(row.data) as Record<string, unknown>;
     data.id = row.id;
-
-    // Look up taxonomy detail
-    let taxonomy;
-    if (row.taxonomy_id) {
-      const taxRow = await db
-        .prepare("SELECT data FROM taxonomies WHERE id = ?1 OR airtable_id = ?1")
-        .bind(row.taxonomy_id)
-        .first<{ data: string }>();
-      if (taxRow) {
-        taxonomy = mapTaxonomy(JSON.parse(taxRow.data) as Record<string, unknown>);
-      }
-    }
-
-    items.push(mapTaxonomyTerm(data, taxonomy));
-  }
+    const taxData = row.taxonomy_id ? taxMap.get(row.taxonomy_id) : undefined;
+    const taxonomy = taxData ? mapTaxonomy(taxData) : undefined;
+    return mapTaxonomyTerm(data, taxonomy);
+  });
 
   const start = (page - 1) * perPage;
   const pageItems = items.slice(start, start + perPage);
@@ -123,11 +136,24 @@ taxonomyTerms.get("/", async (c) => {
 taxonomyTerms.get("/:id", async (c) => {
   const db = c.env.DB;
   const termId = c.req.param("id");
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(termId);
 
-  const row = await db
+  let row = await db
     .prepare("SELECT id, taxonomy_id, data FROM taxonomy_terms WHERE id = ?1 OR airtable_id = ?1")
     .bind(termId)
     .first<{ id: string; taxonomy_id: string; data: string }>();
+
+  if (!row && isUuid) {
+    const { results: allRows } = await db
+      .prepare("SELECT id, taxonomy_id, data FROM taxonomy_terms")
+      .all<{ id: string; taxonomy_id: string; data: string }>();
+    for (const candidate of allRows) {
+      if (toUuid(candidate.id) === termId.toLowerCase()) {
+        row = candidate;
+        break;
+      }
+    }
+  }
 
   if (!row) return c.json({ detail: "Taxonomy term not found" }, 404);
 

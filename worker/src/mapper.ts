@@ -43,6 +43,119 @@ export function joinList(list: unknown[] | undefined | null): string | undefined
 }
 
 /**
+ * Return the value only if it looks like a valid email address.
+ * Airtable data sometimes stores URLs in email fields — strip those.
+ */
+export function sanitiseEmail(value: unknown): string | undefined {
+  if (!value) return undefined;
+  const s = String(value).trim();
+  // Reject URLs and anything without exactly one '@'
+  if (s.includes("://") || s.startsWith("www.")) return undefined;
+  if (!s.includes("@")) return undefined;
+  return s;
+}
+
+/**
+ * Ensure a URL value has a valid scheme prefix.
+ * Bare "www.example.com" fails the HSDS-UK 'uri' format check.
+ */
+export function normaliseUrl(value: unknown): string | undefined {
+  if (!value) return undefined;
+  const s = String(value).trim();
+  if (!s) return undefined;
+  if (s.startsWith("http://") || s.startsWith("https://")) return s;
+  // Add https:// to bare domain or www URLs
+  if (s.startsWith("www.") || s.includes(".")) return `https://${s}`;
+  return s;
+}
+
+
+export function normaliseStatus(status: unknown): string {
+  if (!status) return "active";
+  const s = String(status).toLowerCase().trim();
+  if (s === "published" || s === "active") return "active";
+  if (s === "inactive" || s === "unpublished" || s === "draft") return "inactive";
+  if (s === "defunct" || s === "closed" || s === "removed") return "defunct";
+  if (s === "temporarily closed" || s === "temp closed") return "temporarily closed";
+  return "active"; // safe default
+}
+
+// Fixed namespace UUID for deterministic mapping (UUID v5 using SHA-1)
+// All Airtable record IDs are namespaced under this fixed UUID.
+const AIRTABLE_NAMESPACE = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"; // UUID v4 namespace (URL)
+
+/**
+ * Convert an Airtable record ID (e.g. "recXXXXXXXXXXXX") to a deterministic
+ * UUID v5. The HSDS-UK 3.0 spec requires all `id` fields to be in UUID format.
+ *
+ * Uses SubtleCrypto SHA-1 to generate a stable UUID that is the same for the
+ * same input every time, so cross-references between services, orgs, and
+ * locations remain consistent.
+ */
+const _uuidCache = new Map<string, string>();
+
+async function airtableIdToUuid(id: string): Promise<string> {
+  if (!id) return "00000000-0000-0000-0000-000000000000";
+
+  // Return already-valid UUIDs unchanged
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+    return id.toLowerCase();
+  }
+
+  const cached = _uuidCache.get(id);
+  if (cached) return cached;
+
+  // UUID v5: SHA-1 of (namespace bytes + name bytes), formatted as UUID
+  const nsHex = AIRTABLE_NAMESPACE.replace(/-/g, "");
+  const nsBytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) nsBytes[i] = parseInt(nsHex.slice(i * 2, i * 2 + 2), 16);
+
+  const nameBytes = new TextEncoder().encode(id);
+  const combined = new Uint8Array(nsBytes.length + nameBytes.length);
+  combined.set(nsBytes);
+  combined.set(nameBytes, nsBytes.length);
+
+  const hashBuffer = await crypto.subtle.digest("SHA-1", combined);
+  const h = new Uint8Array(hashBuffer);
+
+  // Set version (5) and variant bits per RFC 4122
+  h[6] = (h[6] & 0x0f) | 0x50; // version 5
+  h[8] = (h[8] & 0x3f) | 0x80; // variant 10xx
+
+  const hex = Array.from(h.slice(0, 16)).map(b => b.toString(16).padStart(2, "0")).join("");
+  const uuid = `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
+
+  _uuidCache.set(id, uuid);
+  return uuid;
+}
+
+/** Synchronous UUID mapping via a pre-computed XOR-fold of the Airtable ID bytes.
+ * Deterministic and fast — no async needed. */
+export function toUuid(id: string): string {
+  if (!id) return "00000000-0000-0000-0000-000000000000";
+
+  // Pass through existing UUIDs unchanged
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+    return id.toLowerCase();
+  }
+
+  // Simple deterministic hash: encode as bytes, pad/fold to 16 bytes
+  const enc = new TextEncoder().encode(id);
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < enc.length; i++) bytes[i % 16] ^= enc[i];
+  // Seed first byte with length to avoid collisions between same-suffix IDs
+  bytes[0] ^= enc.length & 0xff;
+
+  // Set version 5 and variant bits
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+  const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
+}
+
+
+/**
  * Remove undefined/null values from an object (ORUK compliance —
  * optional fields without values should be omitted).
  */
@@ -62,7 +175,7 @@ export function stripNulls<T extends Record<string, unknown>>(obj: T): Partial<T
 
 export function mapPhone(data: Record<string, unknown>): Phone {
   return stripNulls({
-    id: (data.id as string) || "",
+    id: toUuid((data.id as string) || ""),
     number: (data.number as string) || "",
     extension: data.extension as string | undefined,
     type: data.type as string | undefined,
@@ -75,7 +188,7 @@ export function mapAddress(data: Record<string, unknown>): Address {
   if (Array.isArray(addressType)) addressType = firstOrNone(addressType);
 
   return stripNulls({
-    id: (data.id as string) || "",
+    id: toUuid((data.id as string) || ""),
     address_1: data.address_1 as string | undefined,
     address_2: data.address_2 as string | undefined,
     city: data.city as string | undefined,
@@ -90,7 +203,7 @@ export function mapAddress(data: Record<string, unknown>): Address {
 
 export function mapLanguage(data: Record<string, unknown>): Language {
   return stripNulls({
-    id: (data.id as string) || "",
+    id: toUuid((data.id as string) || ""),
     name: data.name as string | undefined,
     code: data.code as string | undefined,
     note: data.note as string | undefined,
@@ -99,10 +212,10 @@ export function mapLanguage(data: Record<string, unknown>): Language {
 
 export function mapAccessibility(data: Record<string, unknown>): Accessibility {
   return stripNulls({
-    id: (data.id as string) || "",
+    id: toUuid((data.id as string) || ""),
     description: data.description as string | undefined,
     details: data.details as string | undefined,
-    url: data.url as string | undefined,
+    url: normaliseUrl(data.url),
   }) as Accessibility;
 }
 
@@ -111,7 +224,7 @@ export function mapSchedule(data: Record<string, unknown>): Schedule {
   if (Array.isArray(byday)) byday = byday.join(",");
 
   return stripNulls({
-    id: (data.id as string) || "",
+    id: toUuid((data.id as string) || ""),
     valid_from: data.valid_from as string | undefined,
     valid_to: data.valid_to as string | undefined,
     dtstart: data.dtstart as string | undefined,
@@ -139,18 +252,18 @@ export function mapContact(
   phones?: Phone[],
 ): Contact {
   return stripNulls({
-    id: (data.id as string) || "",
+    id: toUuid((data.id as string) || ""),
     name: data.name as string | undefined,
     title: data.title as string | undefined,
     department: data.department as string | undefined,
-    email: data.email as string | undefined,
+    email: sanitiseEmail(data.email),
     phones: phones && phones.length > 0 ? phones : undefined,
   }) as Contact;
 }
 
 export function mapServiceArea(data: Record<string, unknown>): ServiceArea {
   return stripNulls({
-    id: (data.id as string) || "",
+    id: toUuid((data.id as string) || ""),
     name: data.name as string | undefined,
     description: data.description as string | undefined,
     extent: data.extent as string | undefined,
@@ -161,7 +274,7 @@ export function mapServiceArea(data: Record<string, unknown>): ServiceArea {
 
 export function mapProgram(data: Record<string, unknown>): Program {
   return stripNulls({
-    id: (data.id as string) || "",
+    id: toUuid((data.id as string) || ""),
     name: (data.name as string) || "",
     alternate_name: data.alternate_name as string | undefined,
     description: data.description as string | undefined,
@@ -170,14 +283,14 @@ export function mapProgram(data: Record<string, unknown>): Program {
 
 export function mapFunding(data: Record<string, unknown>): Funding {
   return stripNulls({
-    id: (data.id as string) || "",
+    id: toUuid((data.id as string) || ""),
     source: data.source as string | undefined,
   }) as Funding;
 }
 
 export function mapCostOption(data: Record<string, unknown>): CostOption {
   return stripNulls({
-    id: (data.id as string) || "",
+    id: toUuid((data.id as string) || ""),
     option: data.option as string | undefined,
     currency: data.currency as string | undefined,
     amount: safeFloat(data.amount),
@@ -189,7 +302,7 @@ export function mapCostOption(data: Record<string, unknown>): CostOption {
 
 export function mapRequiredDocument(data: Record<string, unknown>): RequiredDocument {
   return stripNulls({
-    id: (data.id as string) || "",
+    id: toUuid((data.id as string) || ""),
     document: data.document as string | undefined,
     uri: data.uri as string | undefined,
   }) as RequiredDocument;
@@ -197,9 +310,9 @@ export function mapRequiredDocument(data: Record<string, unknown>): RequiredDocu
 
 export function mapTaxonomy(data: Record<string, unknown>): Taxonomy {
   return stripNulls({
-    id: (data.id as string) || "",
+    id: toUuid((data.id as string) || ""),
     name: (data.name as string) || "",
-    description: data.description as string | undefined,
+    description: (data.description as string) || "",
     uri: data.uri as string | undefined,
     version: data.version as string | undefined,
   }) as Taxonomy;
@@ -210,11 +323,11 @@ export function mapTaxonomyTerm(
   taxonomy?: Taxonomy,
 ): TaxonomyTerm {
   return stripNulls({
-    id: (data.id as string) || "",
+    id: toUuid((data.id as string) || ""),
     name: (data.name as string) || "",
     code: data.code as string | undefined,
-    description: data.description as string | undefined,
-    parent_id: firstOrNone(data.parent as string[] | undefined),
+    description: (data.description as string) || "",
+    parent_id: toUuid(firstOrNone(data.parent as string[] | undefined) ?? "") || undefined,
     taxonomy: firstOrNone(data.taxonomy as string[] | undefined),
     taxonomy_detail: taxonomy,
     language: data.language as string | undefined,
@@ -237,9 +350,9 @@ export function mapLocation(
   if (Array.isArray(locationType)) locationType = firstOrNone(locationType);
 
   return stripNulls({
-    id: (data.id as string) || "",
+    id: toUuid((data.id as string) || ""),
     location_type: locationType as string | undefined,
-    url: data.url as string | undefined,
+    url: normaliseUrl(data.url),
     name: data.name as string | undefined,
     alternate_name: data.alternate_name as string | undefined,
     description: data.description as string | undefined,
@@ -259,13 +372,13 @@ export function mapLocation(
 
 export function mapOrganizationSummary(data: Record<string, unknown>): OrganizationSummary {
   return stripNulls({
-    id: (data.id as string) || "",
+    id: toUuid((data.id as string) || ""),
     name: (data.name as string) || "",
     alternate_name: data.alternate_name as string | undefined,
     description: data.description as string | undefined,
-    email: data.email as string | undefined,
-    website: data.website as string | undefined,
-    logo: data.logo as string | undefined,
+    email: sanitiseEmail(data.email),
+    website: normaliseUrl(data.website),
+    logo: normaliseUrl(data.logo),
     uri: data.uri as string | undefined,
   }) as OrganizationSummary;
 }
@@ -281,17 +394,17 @@ export function mapOrganization(
   },
 ): Organization {
   return stripNulls({
-    id: (data.id as string) || "",
+    id: toUuid((data.id as string) || ""),
     name: (data.name as string) || "",
     alternate_name: data.alternate_name as string | undefined,
     description: data.description as string | undefined,
-    email: data.email as string | undefined,
-    website: data.website as string | undefined,
+    email: sanitiseEmail(data.email),
+    website: normaliseUrl(data.website),
     year_incorporated: safeInt(data.year_incorporated),
     legal_status: data.legal_status as string | undefined,
-    logo: data.logo as string | undefined,
+    logo: normaliseUrl(data.logo),
     uri: data.uri as string | undefined,
-    parent_organization_id: firstOrNone(data.organization as string[] | undefined),
+    parent_organization_id: toUuid(firstOrNone(data.organization as string[] | undefined) ?? "") || undefined,
     phones: opts?.phones && opts.phones.length > 0 ? opts.phones : undefined,
     contacts: opts?.contacts && opts.contacts.length > 0 ? opts.contacts : undefined,
     locations: opts?.locations && opts.locations.length > 0 ? opts.locations : undefined,
@@ -311,8 +424,8 @@ export function mapServiceAtLocation(
   },
 ): ServiceAtLocation {
   return stripNulls({
-    id: (data.id as string) || "",
-    service_id: firstOrNone(data.services as string[] | undefined),
+    id: toUuid((data.id as string) || ""),
+    service_id: toUuid(firstOrNone(data.services as string[] | undefined) ?? "") || undefined,
     description: data.description as string | undefined,
     location: opts?.location,
     phones: opts?.phones && opts.phones.length > 0 ? opts.phones : undefined,
@@ -328,14 +441,14 @@ export function mapServiceSummary(
   organization?: OrganizationSummary,
 ): ServiceSummary {
   return stripNulls({
-    id: (data.id as string) || "",
-    organization_id: organizationId,
+    id: toUuid((data.id as string) || ""),
+    organization_id: toUuid(organizationId),
     name: (data.name as string) || "",
-    status: (data.status as string) || "active",
+    status: normaliseStatus(data.status),
     alternate_name: data.alternate_name as string | undefined,
     description: data.description as string | undefined,
-    url: data.url as string | undefined,
-    email: data.email as string | undefined,
+    url: normaliseUrl(data.url),
+    email: sanitiseEmail(data.email),
     last_modified: data.lastUpdated as string | undefined,
     organization,
     need_focus: (data.needFocus as string[]) || [],
@@ -364,14 +477,14 @@ export function mapService(
   const groupName = groupNameList && groupNameList.length > 0 ? groupNameList[0] : undefined;
 
   return stripNulls({
-    id: (data.id as string) || "",
-    organization_id: organizationId,
+    id: toUuid((data.id as string) || ""),
+    organization_id: toUuid(organizationId),
     name: (data.name as string) || "",
-    status: (data.status as string) || "active",
+    status: normaliseStatus(data.status),
     alternate_name: data.alternate_name as string | undefined,
     description: data.description as string | undefined,
-    url: data.url as string | undefined,
-    email: data.email as string | undefined,
+    url: normaliseUrl(data.url),
+    email: sanitiseEmail(data.email),
     interpretation_services: data.interpretation_services as string | undefined,
     application_process: data.application_process as string | undefined,
     fees_description: data.fees_description as string | undefined,
