@@ -54,3 +54,15 @@ build/
 # Keys
 *.pem
 *.key
+
+# Worker
+worker/node_modules/
+worker/.wrangler/
+worker/dist/
+
+# Frontend v2
+hsdirectory-v2/node_modules/
+hsdirectory-v2/.next/
+hsdirectory-v2/.vercel/
+hsdirectory-v2/.env.local
+

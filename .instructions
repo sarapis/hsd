@@ -1,1 +1,59 @@
-See `CLAUDE.md` for full project instructions, tech stack, deployment procedures, and gotchas.
+# ATtoOR — Mutual Aid NYC Service Directory
+
+## Overview
+Community service directory for NYC, built on HSDS 3.0 (Open Referral). Dual-stack: legacy Hetzner + zero-cost Cloudflare/Vercel.
+
+## Tech Stack
+
+### Legacy (Hetzner — services.wegov.nyc)
+- **Backend**: FastAPI (Python) — port 8300
+- **Frontend**: Next.js — port 3100
+- **Database**: SQLite (FTS5)
+- **Data source**: Airtable
+
+### Zero-Cost (Cloudflare + Vercel)
+- **Backend**: Cloudflare Worker (`hsds-api`) — Hono + D1
+- **Frontend**: Vercel (`hsdirectory-v2`) — Next.js
+- **MCP Server**: `/mcp` on the Worker (5 tools via McpAgent Durable Object)
+- **Chat**: `/api/chat` — RAG with Workers AI (Llama 3.3 70B)
+- **Sync**: Airtable → D1 every 15 min via cron trigger
+
+## Repository Layout
+```
+ATtoOR/
+├── airtable/         # Python Airtable client + sync (legacy)
+├── db/               # Python SQLite database (legacy)
+├── routes/           # FastAPI routes (legacy)
+├── transform/        # Airtable→HSDS mapper (legacy)
+├── hsdirectory/      # Next.js frontend (legacy, Hetzner)
+├── hsdirectory-v2/   # Next.js frontend (Vercel fork)
+├── worker/           # Cloudflare Worker (API + MCP + Chat)
+│   └── src/
+│       ├── routes/   # Hono REST endpoints
+│       ├── sync/     # Airtable→D1 sync engine
+│       ├── mcp/      # MCP Agent (Durable Object)
+│       ├── chat/     # RAG chat handler
+│       └── db/       # D1 schema + queries
+├── utils/            # Geocoder, haversine
+└── geocache.json     # Nominatim geocode cache (145 entries)
+```
+
+## Deployment
+
+### Cloudflare Worker
+- URL: https://hsds-api.devin-d41.workers.dev
+- D1 DB: `hsds-directory` (0fc18275-0eed-4d31-9d7d-02c43f4fed10)
+- Secrets: `AIRTABLE_API_KEY`, `AIRTABLE_BASE_ID` (via `wrangler secret put`)
+- Deploy: `cd worker && npx wrangler deploy`
+
+### Vercel Frontend
+- URL: https://hsdirectory-v2.vercel.app
+- Env: `NEXT_PUBLIC_API_URL=https://hsds-api.devin-d41.workers.dev`
+- Deploy: `cd hsdirectory-v2 && npx vercel --prod`
+
+## Gotchas
+- D1 has no FTS5 — search uses `LIKE` on `json_extract()`
+- Free plan Durable Objects need `new_sqlite_classes` migration
+- Full sync exceeds CPU limits on fetch — use per-table `/sync/table/:name` or let cron handle it
+- Airtable table IDs in `worker/src/sync/airtable-client.ts` must match Python client
+- Geocache coordinates supplement location records for map display

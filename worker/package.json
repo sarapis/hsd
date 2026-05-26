@@ -1,0 +1,25 @@
+{
+  "name": "hsds-api",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:smoke": "vitest run tests/smoke",
+    "db:migrate": "wrangler d1 execute hsds-directory --local --file=src/db/schema.sql",
+    "db:migrate:remote": "wrangler d1 execute hsds-directory --remote --file=src/db/schema.sql"
+  },
+  "dependencies": {
+    "agents": "^0.0.74",
+    "hono": "^4.7.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250501.0",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.6",
+    "wrangler": "^4.14.0"
+  }
+}

@@ -1,0 +1,38 @@
+name = "hsds-api"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[ai]
+binding = "AI"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hsds-directory"
+database_id = "0fc18275-0eed-4d31-9d7d-02c43f4fed10"
+
+[vars]
+PUBLISHED_STATUS_VALUE = "Published"
+SYNC_INTERVAL_MINUTES = "15"
+
+# Secrets (set via: wrangler secret put AIRTABLE_API_KEY, etc.)
+# AIRTABLE_API_KEY
+# AIRTABLE_BASE_ID
+
+# Durable Object for MCP Agent
+[[durable_objects.bindings]]
+name = "DIRECTORY_MCP_AGENT"
+class_name = "DirectoryMcpAgent"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DirectoryMcpAgent"]
+
+# Cron trigger for Airtable sync (every 15 minutes)
+[triggers]
+crons = ["*/15 * * * *"]
+
+# Custom domain — allows WAF/bot-protection tuning unlike *.workers.dev
+[[routes]]
+pattern = "services-api.wegov.nyc/*"
+zone_name = "wegov.nyc"
