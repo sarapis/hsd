@@ -4,23 +4,21 @@ A zero-cost community resource directory built on [HSDS 3.0](https://docs.openre
 
 Built for [Mutual Aid NYC](https://mutualaid.nyc) and [Open Referral](https://openreferral.org/).
 
-> **Branch note:** This is the `cloudflare-vercel-v2` branch — a serverless rewrite of the legacy FastAPI/Hetzner stack. Both versions run in parallel. See the `main` branch for the original.
-
 ## Architecture
 
 ```
 ┌─────────────┐   cron every 15min   ┌──────────────────────────────────┐
 │   Airtable  │ ───────────────────▶ │  Cloudflare Worker (hsds-api)   │
-│   (source)  │   incremental sync   │  ├─ Hono router (HSDS 3.0 API) │
-└─────────────┘                      │  ├─ D1 database (SQLite edge)  │
-                                     │  ├─ Workers AI (Llama 3.3 70B) │
-                                     │  ├─ MCP server (Durable Object)│
-                                     │  └─ Search token index         │
-                                     └───────────┬────────────────────┘
-                                                  │
-                                     ┌────────────┴───────────────────┐
-                                     │  Vercel (hsdirectory-v2)       │
-                                     │  ├─ Next.js 15 App Router     │
+│   (source)  │   incremental sync   │  ├─ Hono router (HSDS 3.0 API)   │
+│   (Airtable)│                      │  ├─ D1 database (SQLite edge)  │
+│             │                      │  ├─ Workers AI (Llama 3.3 70B) │
+│             │                      │  ├─ MCP server (Durable Object)│
+│             │                      │  └─ Search token index         │
+└─────────────┘                      └───────────┬────────────────────┘
+                                                 │
+                                     ┌───────────┴────────────────────┐
+                                     │  Vercel (services-wegov-nyc)   │
+                                     │  ├─ Next.js (App Router)       │
                                      │  ├─ MapLibre GL interactive   │
                                      │  └─ LLM chat widget           │
                                      └────────────────────────────────┘
@@ -32,25 +30,25 @@ Built for [Mutual Aid NYC](https://mutualaid.nyc) and [Open Referral](https://op
 
 | Component | URL |
 |-----------|-----|
-| Frontend | https://hsdirectory-v2.vercel.app |
-| API | https://hsds-api.devin-d41.workers.dev |
-| API Health | https://hsds-api.devin-d41.workers.dev/health |
-| MCP Server | https://hsds-api.devin-d41.workers.dev/mcp |
+| Frontend (Production) | https://services.wegov.nyc |
+| API (Production) | https://services-api.wegov.nyc |
+| API Health | https://services-api.wegov.nyc/health |
+| MCP Server | https://services-api.wegov.nyc/mcp |
 
 ## Key Features
 
-### vs. Legacy (main branch)
+### Modern Serverless Stack (v2)
 
 | Feature | Legacy (Hetzner) | v2 (Cloudflare + Vercel) |
 |---------|-----------------|------------------------|
-| Backend | FastAPI (Python) | Cloudflare Worker (TypeScript) |
+| Backend | FastAPI (Python) | Hono / Cloudflare Worker (TypeScript) |
 | Database | SQLite file + FTS5 | Cloudflare D1 (edge SQLite) |
 | Search | FTS5 full-text | Token index with stemming + ranking |
 | Geocoding | Nominatim (spotty) | Google Geocoding API (98% coverage) |
 | AI Chat | None | Workers AI Llama 3.3 70B with RAG |
 | MCP | None | 5-tool MCP server for AI agents |
 | Hosting | ~$5-10/mo VPS | $0/month |
-| Deploy | SSH + Docker | `wrangler deploy` + `vercel --prod` |
+| Deploy | SSH + Docker | `wrangler deploy` + `vercel build && deploy` |
 
 ### Search
 
@@ -80,9 +78,8 @@ Incremental sync compares Airtable's `modifiedTime` against D1's `updated_at`:
 ### 1. Clone and setup
 
 ```bash
-git clone https://github.com/MutualAidNYC/hsdirectory.git
-cd hsdirectory
-git checkout cloudflare-vercel-v2
+git clone https://github.com/sarapis/hsd.git
+cd hsd
 ```
 
 ### 2. Worker (API backend)
@@ -97,7 +94,7 @@ wrangler login
 # Create D1 database
 wrangler d1 create hsds-directory
 
-# Update wrangler.toml with your database_id, then:
+# Update wrangler.toml with your database_id, then execute local schema:
 wrangler d1 execute hsds-directory --local --file=src/db/schema.sql
 
 # Set secrets
@@ -118,29 +115,34 @@ wrangler deploy
 cd hsdirectory-v2
 npm install
 
-# Configure API URL
-echo "NEXT_PUBLIC_API_URL=https://hsds-api.YOUR-SUBDOMAIN.workers.dev" > .env.local
+# Configure API URL for local development
+echo "NEXT_PUBLIC_API_URL=http://localhost:8787" > .env.local
 
 # Local dev
 npm run dev
 
-# Deploy to Vercel
-npx vercel --prod
+# Deploy to Vercel (Production)
+# 1. Pull settings and variables
+npx vercel pull --yes --environment production --scope YOUR_SCOPE
+# 2. Build Next.js locally with target env
+NEXT_PUBLIC_API_URL=https://services-api.wegov.nyc npx vercel build --prod --yes --scope YOUR_SCOPE
+# 3. Deploy prebuilt bundle
+npx vercel deploy --prebuilt --prod --scope YOUR_SCOPE
 ```
 
 ### 4. Initial data seed
 
 ```bash
 # Trigger Airtable → D1 sync
-curl -X POST https://your-worker.workers.dev/sync/trigger \
+curl -X POST https://services-api.wegov.nyc/sync/trigger \
   -H "Authorization: Bearer YOUR_SYNC_SECRET"
 
 # Cache category icons (run until remaining=0)
-curl -X POST https://your-worker.workers.dev/sync/icons \
+curl -X POST https://services-api.wegov.nyc/sync/icons \
   -H "Authorization: Bearer YOUR_SYNC_SECRET"
 
 # Geocode addresses (batches of 10, run until remaining=0)
-curl -X POST https://your-worker.workers.dev/sync/geocode \
+curl -X POST https://services-api.wegov.nyc/sync/geocode \
   -H "Authorization: Bearer YOUR_SYNC_SECRET"
 ```
 
@@ -155,7 +157,7 @@ curl -X POST https://your-worker.workers.dev/sync/geocode \
 | `GET` | `/` | API metadata (HSDS 3.0) |
 | `GET` | `/health` | Health check with service count |
 | `GET` | `/services` | Paginated services (`?search=`, `?page=`, `?per_page=`) |
-| `GET` | `/services/:id` | Full service detail with nested relations |
+| `GET` | `/services/:id` | Full service detail with nested relations (UUID format support) |
 | `GET` | `/organizations` | Paginated organizations |
 | `GET` | `/organizations/:id` | Organization detail |
 | `GET` | `/map/services` | Services with coordinates + categories for map |
@@ -178,7 +180,7 @@ curl -X POST https://your-worker.workers.dev/sync/geocode \
 ## Project Structure
 
 ```
-hsdirectory/
+hsd/
 ├── worker/                        # Cloudflare Worker (API backend)
 │   ├── src/
 │   │   ├── index.ts               # Hono app + routes + cron handler
@@ -215,9 +217,6 @@ hsdirectory/
 │   │       └── api.ts             # Typed API client
 │   └── package.json
 │
-├── worker/scripts/                # Local utilities
-│   └── geocode_google.py          # Bulk geocoding script
-│
 └── README.md                      # ← you are here
 ```
 
@@ -241,11 +240,11 @@ hsdirectory/
 | `PUBLISHED_STATUS_VALUE` | `Published` | Filter services by status |
 | `SYNC_INTERVAL_MINUTES` | `15` | Cron sync interval |
 
-### Frontend Environment (`.env.local`)
+### Frontend Environment (`.env.production.local` / Vercel Env)
 
 | Variable | Description |
 |----------|-------------|
-| `NEXT_PUBLIC_API_URL` | Worker API URL |
+| `NEXT_PUBLIC_API_URL` | Worker API URL (`https://services-api.wegov.nyc`) |
 
 ---
 
@@ -261,13 +260,13 @@ The Worker exposes an MCP server at `/mcp` with 5 tools for AI agents:
 | `get_organization` | Organization detail by ID |
 | `get_directory_stats` | Summary stats + category list |
 
-Connect from any MCP client:
+Connect from any MCP client (like Cursor, Claude Desktop, or Devin):
 
 ```json
 {
   "mcpServers": {
     "mutualaid-nyc": {
-      "url": "https://hsds-api.devin-d41.workers.dev/mcp"
+      "url": "https://services-api.wegov.nyc/mcp"
     }
   }
 }
