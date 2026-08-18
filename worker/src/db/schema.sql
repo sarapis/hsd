@@ -6,6 +6,7 @@
 CREATE TABLE IF NOT EXISTS organizations (
     id TEXT PRIMARY KEY,
     airtable_id TEXT UNIQUE,
+    uuid TEXT,
     data TEXT NOT NULL,
     updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -13,6 +14,7 @@ CREATE TABLE IF NOT EXISTS organizations (
 CREATE TABLE IF NOT EXISTS services (
     id TEXT PRIMARY KEY,
     airtable_id TEXT UNIQUE,
+    uuid TEXT,
     organization_id TEXT,
     data TEXT NOT NULL,
     updated_at TEXT DEFAULT (datetime('now'))
@@ -21,6 +23,7 @@ CREATE TABLE IF NOT EXISTS services (
 CREATE TABLE IF NOT EXISTS locations (
     id TEXT PRIMARY KEY,
     airtable_id TEXT UNIQUE,
+    uuid TEXT,
     data TEXT NOT NULL,
     updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -28,6 +31,7 @@ CREATE TABLE IF NOT EXISTS locations (
 CREATE TABLE IF NOT EXISTS service_at_locations (
     id TEXT PRIMARY KEY,
     airtable_id TEXT UNIQUE,
+    uuid TEXT,
     service_id TEXT,
     location_id TEXT,
     data TEXT NOT NULL,
@@ -37,6 +41,7 @@ CREATE TABLE IF NOT EXISTS service_at_locations (
 CREATE TABLE IF NOT EXISTS taxonomies (
     id TEXT PRIMARY KEY,
     airtable_id TEXT UNIQUE,
+    uuid TEXT,
     data TEXT NOT NULL,
     updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -44,6 +49,7 @@ CREATE TABLE IF NOT EXISTS taxonomies (
 CREATE TABLE IF NOT EXISTS taxonomy_terms (
     id TEXT PRIMARY KEY,
     airtable_id TEXT UNIQUE,
+    uuid TEXT,
     taxonomy_id TEXT,
     data TEXT NOT NULL,
     updated_at TEXT DEFAULT (datetime('now'))
@@ -167,3 +173,14 @@ CREATE INDEX IF NOT EXISTS idx_sal_location ON service_at_locations(location_id)
 CREATE INDEX IF NOT EXISTS idx_terms_taxonomy ON taxonomy_terms(taxonomy_id);
 CREATE INDEX IF NOT EXISTS idx_search_token ON search_tokens(token);
 CREATE INDEX IF NOT EXISTS idx_search_service ON search_tokens(service_id);
+
+-- Deterministic uuid lookup (see toUuid in mapper.ts). Unique so a hash
+-- collision fails loudly at sync time instead of silently serving the
+-- wrong record. SQLite allows many NULLs in a UNIQUE index, so rows
+-- awaiting backfill coexist fine.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_organizations_uuid ON organizations(uuid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_services_uuid ON services(uuid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_locations_uuid ON locations(uuid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_service_at_locations_uuid ON service_at_locations(uuid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_taxonomies_uuid ON taxonomies(uuid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_taxonomy_terms_uuid ON taxonomy_terms(uuid);

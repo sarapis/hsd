@@ -6,10 +6,10 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import {
-  mapOrganizationSummary, mapOrganization, mapServiceSummary,
-  mapLocation, mapAddress, mapPhone, mapContact, mapProgram, mapFunding,
-  paginate, toUuid,
+  mapOrganizationSummary, mapOrganization, mapServiceSummary, mapLocation, mapAddress, mapPhone, mapContact, mapProgram, mapFunding, paginate,
 } from "../mapper";
+import { parsePage, parsePerPage } from "../utils/pagination";
+import { resolveRecordId } from "../db/queries";
 
 const organizations = new Hono<{ Bindings: Env }>();
 
@@ -20,8 +20,8 @@ organizations.get("/", async (c) => {
   const db = c.env.DB;
   const publishedStatus = c.env.PUBLISHED_STATUS_VALUE;
 
-  const page = Math.max(1, Number(c.req.query("page") ?? 1));
-  const perPage = Math.min(100, Math.max(1, Number(c.req.query("per_page") ?? 20)));
+  const page = parsePage(c.req.query("page"));
+  const perPage = parsePerPage(c.req.query("per_page"));
   const search = c.req.query("search");
   const full = c.req.query("full") === "true";
 
@@ -108,11 +108,17 @@ organizations.get("/:id/services", async (c) => {
   const publishedStatus = c.env.PUBLISHED_STATUS_VALUE;
   const orgId = c.req.param("id");
 
-  const page = Math.max(1, Number(c.req.query("page") ?? 1));
-  const perPage = Math.min(100, Math.max(1, Number(c.req.query("per_page") ?? 100)));
+  const page = parsePage(c.req.query("page"));
+  const perPage = parsePerPage(c.req.query("per_page"), 100);
+
+  // services.organization_id holds the raw Airtable id, but every link into this
+  // route comes from a response that publishes uuids — so filtering on the
+  // caller's id directly matched nothing and org pages showed no services at all.
+  const resolvedOrgId = await resolveRecordId(db, "organizations", orgId);
+  if (!resolvedOrgId) return c.json({ detail: "Organization not found" }, 404);
 
   const whereClauses = ["(organization_id = ?1)"];
-  const params: unknown[] = [orgId];
+  const params: unknown[] = [resolvedOrgId];
   let paramIndex = 2;
 
   if (publishedStatus) {
@@ -139,7 +145,7 @@ organizations.get("/:id/services", async (c) => {
   const items = svcRows.map((row) => {
     const data = JSON.parse(row.data) as Record<string, unknown>;
     data.id = row.id;
-    return mapServiceSummary(data, orgId);
+    return mapServiceSummary(data, resolvedOrgId);
   });
 
   return c.json(paginate(items, total, page, perPage));
@@ -151,23 +157,19 @@ organizations.get("/:id/services", async (c) => {
 organizations.get("/:id", async (c) => {
   const db = c.env.DB;
   const orgId = c.req.param("id");
-  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(orgId);
-
   let row = await db
     .prepare("SELECT id, data FROM organizations WHERE id = ?1 OR airtable_id = ?1")
     .bind(orgId)
     .first<{ id: string; data: string }>();
 
-  // UUID reverse-lookup: scan all orgs to find the one whose toUuid matches.
-  if (!row && isUuid) {
-    const { results: allRows } = await db
-      .prepare("SELECT id, data FROM organizations")
-      .all<{ id: string; data: string }>();
-    for (const candidate of allRows) {
-      if (toUuid(candidate.id) === orgId.toLowerCase()) {
-        row = candidate;
-        break;
-      }
+  // Not a raw id — resolve the published uuid against the indexed column.
+  if (!row) {
+    const resolvedId = await resolveRecordId(db, "organizations", orgId);
+    if (resolvedId) {
+      row = await db
+        .prepare("SELECT id, data FROM organizations WHERE id = ?1")
+        .bind(resolvedId)
+        .first<{ id: string; data: string }>();
     }
   }
 

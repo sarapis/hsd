@@ -252,6 +252,12 @@ export default function MapPageClient({
         return results.map(s => s.service);
     }, [services, searchQuery, selectedNeed, selectedCommunity, selectedBorough, userLocation]);
 
+    // Count filtered resources with no coordinates — these can't be plotted on the map.
+    const unmappedCount = useMemo(
+        () => filteredServices.filter(s => !(s.latitude && s.longitude)).length,
+        [filteredServices]
+    );
+
     // Get locations for map
     const mapLocations = useMemo(() => {
         const locations = filteredServices
@@ -474,8 +480,15 @@ export default function MapPageClient({
             </div>
 
             {/* Right Column: Map */}
-            <div className={`${viewMode === 'map' ? 'block' : 'hidden'} md:block flex-1 relative h-full min-w-0 p-2 md:p-2`}>
-                <div className="w-full h-full rounded-xl overflow-hidden shadow-lg border border-[var(--card-border)]">
+            <div className={`${viewMode === 'map' ? 'block' : 'hidden'} md:block flex-1 relative h-full min-w-0 p-2 md:p-2 flex flex-col gap-2`}>
+                {unmappedCount > 0 && (
+                    <div className="flex-shrink-0 rounded-lg bg-[var(--section-alt)] border border-[var(--card-border)] px-3 py-2 text-xs text-[var(--muted)]">
+                        {unmappedCount === filteredServices.length
+                            ? `None of these ${unmappedCount} resources have a mappable address, so there's nothing to place on the map. Switch to the list view to see them.`
+                            : `${unmappedCount} of ${filteredServices.length} resources ${unmappedCount === 1 ? "has" : "have"} no mappable address and ${unmappedCount === 1 ? "isn't" : "aren't"} shown on the map. Switch to the list view to see ${unmappedCount === 1 ? "it" : "them"}.`}
+                    </div>
+                )}
+                <div className="w-full flex-1 rounded-xl overflow-hidden shadow-lg border border-[var(--card-border)]">
                     <MapViewDynamic locations={mapLocations} highlightedId={hoveredServiceId} />
                 </div>
             </div>

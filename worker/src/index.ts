@@ -19,6 +19,7 @@ import { chat } from "./chat/handler";
 
 // Sync
 import { runFullSync } from "./sync/sync";
+import { toUuid } from "./mapper";
 
 // MCP
 import { DirectoryMcpAgent } from "./mcp/server";
@@ -238,6 +239,58 @@ app.post("/sync/icons", async (c) => {
     cached,
     remaining: toCache.length - batch.length,
     errors: errors.length > 0 ? errors : undefined,
+  });
+});
+
+/**
+ * Backfill the `uuid` column added in migration 001.
+ *
+ * New and updated rows get their uuid from upsertRecord, but existing rows
+ * carry NULL until this runs, and every NULL row forces /:id lookups down the
+ * transitional scan path. Idempotent — only touches rows where uuid IS NULL,
+ * so it is safe to call repeatedly, and safe to call again after a sync.
+ */
+app.post("/sync/backfill-uuids", async (c) => {
+  const denied = requireSyncAuth(c);
+  if (denied) return denied;
+
+  const db = c.env.DB;
+  const tables = [
+    "organizations", "services", "locations",
+    "service_at_locations", "taxonomies", "taxonomy_terms",
+  ];
+
+  const filled: Record<string, number> = {};
+  const collisions: string[] = [];
+
+  for (const table of tables) {
+    const { results } = await db
+      .prepare(`SELECT id FROM ${table} WHERE uuid IS NULL`)
+      .all<{ id: string }>();
+
+    let count = 0;
+    for (let i = 0; i < results.length; i += 50) {
+      const chunk = results.slice(i, i + 50);
+      const statements = chunk.map((row) =>
+        db.prepare(`UPDATE ${table} SET uuid = ?1 WHERE id = ?2`).bind(toUuid(row.id), row.id),
+      );
+      try {
+        await db.batch(statements);
+        count += chunk.length;
+      } catch (err) {
+        // The uuid index is UNIQUE, so a toUuid hash collision surfaces here
+        // rather than silently resolving /:id to the wrong record later.
+        collisions.push(`${table}: ${String(err)}`);
+        break;
+      }
+    }
+    filled[table] = count;
+  }
+
+  return c.json({
+    status: collisions.length > 0 ? "completed_with_errors" : "completed",
+    filled,
+    collisions: collisions.length > 0 ? collisions : undefined,
   });
 });
 

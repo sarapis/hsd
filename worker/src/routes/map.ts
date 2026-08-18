@@ -204,7 +204,11 @@ map.get("/services", async (c) => {
     if (!latitude) {
       for (const addrId of ((data.addresses as string[]) || [])) {
         const geo = geocacheLookup.get(addrId);
-        if (geo) {
+        // Failed and rejected geocodes are stored as (0, 0) sentinel rows. Skip
+        // them rather than accepting the sentinel and breaking — otherwise a
+        // service whose *second* address geocodes fine is assigned (0, 0), then
+        // discarded by the 50-mile filter below, and reads as having no location.
+        if (geo && geo.latitude && geo.longitude) {
           latitude = geo.latitude;
           longitude = geo.longitude;
           if (!address) {

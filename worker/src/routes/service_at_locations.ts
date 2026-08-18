@@ -7,9 +7,10 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import {
-  mapServiceAtLocation, mapLocation, mapAddress, mapPhone, mapContact,
-  mapSchedule, mapServiceArea, paginate, toUuid,
+  mapServiceAtLocation, mapLocation, mapAddress, mapPhone, mapContact, mapSchedule, mapServiceArea, paginate,
 } from "../mapper";
+import { parsePage, parsePerPage } from "../utils/pagination";
+import { resolveRecordId } from "../db/queries";
 
 const serviceAtLocations = new Hono<{ Bindings: Env }>();
 
@@ -18,8 +19,8 @@ const serviceAtLocations = new Hono<{ Bindings: Env }>();
  */
 serviceAtLocations.get("/", async (c) => {
   const db = c.env.DB;
-  const page = Math.max(1, Number(c.req.query("page") ?? 1));
-  const perPage = Math.min(100, Math.max(1, Number(c.req.query("per_page") ?? 20)));
+  const page = parsePage(c.req.query("page"));
+  const perPage = parsePerPage(c.req.query("per_page"));
 
   const { results } = await db
     .prepare("SELECT id, airtable_id, service_id, location_id, data FROM service_at_locations")
@@ -43,23 +44,19 @@ serviceAtLocations.get("/:id", async (c) => {
   const db = c.env.DB;
   const salId = c.req.param("id");
 
-  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(salId);
-
   let row = await db
     .prepare("SELECT id, airtable_id, service_id, location_id, data FROM service_at_locations WHERE id = ?1 OR airtable_id = ?1")
     .bind(salId)
     .first<{ id: string; airtable_id: string; service_id: string; location_id: string; data: string }>();
 
-  // UUID reverse-lookup
-  if (!row && isUuid) {
-    const { results: allRows } = await db
-      .prepare("SELECT id, airtable_id, service_id, location_id, data FROM service_at_locations")
-      .all<{ id: string; airtable_id: string; service_id: string; location_id: string; data: string }>();
-    for (const candidate of allRows) {
-      if (toUuid(candidate.id) === salId.toLowerCase()) {
-        row = candidate;
-        break;
-      }
+  // Not a raw id — resolve the published uuid against the indexed column.
+  if (!row) {
+    const resolvedId = await resolveRecordId(db, "service_at_locations", salId);
+    if (resolvedId) {
+      row = await db
+        .prepare("SELECT id, airtable_id, service_id, location_id, data FROM service_at_locations WHERE id = ?1")
+        .bind(resolvedId)
+        .first<{ id: string; airtable_id: string; service_id: string; location_id: string; data: string }>();
     }
   }
 

@@ -10,7 +10,9 @@
     "test:smoke": "vitest run tests/smoke",
     "test:all": "vitest run",
     "db:migrate": "wrangler d1 execute hsds-directory --local --file=src/db/schema.sql",
-    "db:migrate:remote": "wrangler d1 execute hsds-directory --remote --file=src/db/schema.sql"
+    "db:migrate:remote": "wrangler d1 execute hsds-directory --remote --file=src/db/schema.sql",
+    "db:migrate:uuid": "wrangler d1 execute hsds-directory --local --file=src/db/migrations/001_add_uuid_columns.sql",
+    "db:migrate:uuid:remote": "wrangler d1 execute hsds-directory --remote --file=src/db/migrations/001_add_uuid_columns.sql"
   },
   "dependencies": {
     "agents": "^0.0.74",

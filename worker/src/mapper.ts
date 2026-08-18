@@ -156,6 +156,19 @@ export function toUuid(id: string): string {
 
 
 /**
+ * Convert an optional reference id to a uuid, or omit the field entirely.
+ *
+ * Callers used to write `toUuid(x ?? "") || undefined`, but `toUuid("")` returns
+ * the nil uuid — a truthy string — so the `|| undefined` never fired and records
+ * with no parent published `parent_id: "00000000-0000-0000-0000-000000000000"`
+ * instead of omitting the field. HSDS wants absent optional fields absent.
+ */
+export function toUuidOrUndefined(id: string | undefined | null): string | undefined {
+  if (!id) return undefined;
+  return toUuid(id);
+}
+
+/**
  * Remove undefined/null values from an object (ORUK compliance —
  * optional fields without values should be omitted).
  */
@@ -327,8 +340,8 @@ export function mapTaxonomyTerm(
     name: (data.name as string) || "",
     code: data.code as string | undefined,
     description: (data.description as string) || "",
-    parent_id: toUuid(firstOrNone(data.parent as string[] | undefined) ?? "") || undefined,
-    taxonomy: firstOrNone(data.taxonomy as string[] | undefined),
+    parent_id: toUuidOrUndefined(firstOrNone(data.parent as string[] | undefined)),
+    taxonomy: toUuidOrUndefined(firstOrNone(data.taxonomy as string[] | undefined)),
     taxonomy_detail: taxonomy,
     language: data.language as string | undefined,
     term_uri: data.term_uri as string | undefined,
@@ -404,7 +417,7 @@ export function mapOrganization(
     legal_status: data.legal_status as string | undefined,
     logo: normaliseUrl(data.logo),
     uri: data.uri as string | undefined,
-    parent_organization_id: toUuid(firstOrNone(data.organization as string[] | undefined) ?? "") || undefined,
+    parent_organization_id: toUuidOrUndefined(firstOrNone(data.organization as string[] | undefined)),
     phones: opts?.phones && opts.phones.length > 0 ? opts.phones : undefined,
     contacts: opts?.contacts && opts.contacts.length > 0 ? opts.contacts : undefined,
     locations: opts?.locations && opts.locations.length > 0 ? opts.locations : undefined,
@@ -425,7 +438,7 @@ export function mapServiceAtLocation(
 ): ServiceAtLocation {
   return stripNulls({
     id: toUuid((data.id as string) || ""),
-    service_id: toUuid(firstOrNone(data.services as string[] | undefined) ?? "") || undefined,
+    service_id: toUuidOrUndefined(firstOrNone(data.services as string[] | undefined)),
     description: data.description as string | undefined,
     location: opts?.location,
     phones: opts?.phones && opts.phones.length > 0 ? opts.phones : undefined,

@@ -19,6 +19,8 @@ import {
   stripNulls,
   paginate,
   toUuid,
+  toUuidOrUndefined,
+  mapTaxonomyTerm,
   sanitiseEmail,
   normaliseUrl,
   normaliseStatus,
@@ -135,6 +137,18 @@ describe("Utility helpers", () => {
     it("returns the nil uuid for empty input, and the nil uuid is truthy", () => {
       expect(toUuid("")).toBe("00000000-0000-0000-0000-000000000000");
       expect(Boolean(toUuid(""))).toBe(true);
+    });
+  });
+
+  describe("toUuidOrUndefined", () => {
+    it("converts a present id", () => {
+      expect(toUuidOrUndefined("org-1")).toBe(toUuid("org-1"));
+    });
+
+    it("omits absent ids rather than emitting the nil uuid", () => {
+      expect(toUuidOrUndefined(undefined)).toBeUndefined();
+      expect(toUuidOrUndefined(null)).toBeUndefined();
+      expect(toUuidOrUndefined("")).toBeUndefined();
     });
   });
 
@@ -283,6 +297,30 @@ describe("Map functions", () => {
       const result = mapOrganizationSummary(input);
       expect(result.name).toBe("Mutual Aid NYC");
       expect(result.website).toBe("https://mutualaid.nyc");
+    });
+  });
+
+  describe("mapTaxonomyTerm", () => {
+    it("omits parent_id when the term has no parent", () => {
+      const result = mapTaxonomyTerm({ id: "term-1", name: "Uninsured" });
+      expect("parent_id" in result).toBe(false);
+    });
+
+    it("converts a present parent reference to a uuid", () => {
+      const result = mapTaxonomyTerm({ id: "term-2", name: "Child", parent: ["term-1"] });
+      expect(result.parent_id).toBe(toUuid("term-1"));
+    });
+
+    it("converts the taxonomy reference, matching taxonomy_detail.id", () => {
+      const taxonomy = { id: toUuid("recIRw2WYaFKRJZcv"), name: "Open Eligibility", description: "" };
+      const result = mapTaxonomyTerm(
+        { id: "term-3", name: "Recreation", taxonomy: ["recIRw2WYaFKRJZcv"] },
+        taxonomy,
+      );
+      // Previously leaked the raw Airtable id ("recIRw2WYaFKRJZcv") while
+      // taxonomy_detail.id beside it was already the uuid.
+      expect(result.taxonomy).toBe("15656349-5277-5257-9961-464b524a5a63");
+      expect(result.taxonomy).toBe(result.taxonomy_detail?.id);
     });
   });
 

@@ -5,6 +5,16 @@
  * All queries use parameterized statements to prevent SQL injection.
  */
 
+import { toUuid } from "../mapper";
+
+/** Tables carrying a `uuid` column (see migration 001). */
+const UUID_TABLES = new Set([
+  "organizations", "services", "locations",
+  "service_at_locations", "taxonomies", "taxonomy_terms",
+]);
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /** Tables that can be queried — safelist to prevent injection in table names. */
 const ALLOWED_TABLES = new Set([
   "organizations", "services", "locations", "service_at_locations",
@@ -36,6 +46,13 @@ export async function upsertRecord(
   const columns = ["id", "airtable_id", "data"];
   const values: unknown[] = [id, airtableId, JSON.stringify(data)];
 
+  // Store the published uuid alongside the row so /:id lookups are a single
+  // indexed hit rather than a full-table scan that re-hashes every candidate.
+  if (UUID_TABLES.has(table)) {
+    columns.push("uuid");
+    values.push(toUuid(id));
+  }
+
   for (const [key, value] of Object.entries(extraColumns)) {
     columns.push(key);
     values.push(value);
@@ -52,6 +69,52 @@ export async function upsertRecord(
     ON CONFLICT(id) DO UPDATE SET ${updates}, updated_at=datetime('now')`;
 
   await db.prepare(query).bind(...values).run();
+}
+
+/**
+ * Resolve a publicly-visible id to the raw D1 primary key.
+ *
+ * Callers may present the raw Airtable id, or the uuid the API publishes for it
+ * (which is what every link in our own responses uses). Both indexed columns are
+ * tried first, then the `uuid` column added in migration 001.
+ *
+ * The final branch is a transitional full-table scan for rows whose `uuid` has
+ * not been backfilled yet. It selects only `id` — never the JSON blob — so it is
+ * far cheaper than the per-route scans it replaces, and it stops running at all
+ * once POST /sync/backfill-uuids has been applied. Remove it after that lands
+ * in production.
+ */
+export async function resolveRecordId(
+  db: D1Database,
+  table: string,
+  publicId: string,
+): Promise<string | null> {
+  validateTable(table);
+  if (!publicId) return null;
+
+  const direct = await db
+    .prepare(`SELECT id FROM ${table} WHERE id = ?1 OR airtable_id = ?1`)
+    .bind(publicId)
+    .first<{ id: string }>();
+  if (direct) return direct.id;
+
+  if (!UUID_TABLES.has(table) || !UUID_RE.test(publicId)) return null;
+  const wanted = publicId.toLowerCase();
+
+  const byUuid = await db
+    .prepare(`SELECT id FROM ${table} WHERE uuid = ?1`)
+    .bind(wanted)
+    .first<{ id: string }>();
+  if (byUuid) return byUuid.id;
+
+  const { results } = await db
+    .prepare(`SELECT id FROM ${table} WHERE uuid IS NULL`)
+    .all<{ id: string }>();
+  for (const candidate of results) {
+    if (toUuid(candidate.id) === wanted) return candidate.id;
+  }
+
+  return null;
 }
 
 /**

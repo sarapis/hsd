@@ -7,13 +7,14 @@ import { Hono } from "hono";
 import type { Env } from "../env";
 import type { GeocodedLocation, GeocodedLocationsResponse } from "../types";
 import { safeFloat } from "../mapper";
+import { parseBoundedInt } from "../utils/pagination";
 
 const locations = new Hono<{ Bindings: Env }>();
 
 locations.get("/geocoded", async (c) => {
   const db = c.env.DB;
   const publishedStatus = c.env.PUBLISHED_STATUS_VALUE;
-  const limit = Math.min(1000, Math.max(1, Number(c.req.query("limit") ?? 500)));
+  const limit = parseBoundedInt(c.req.query("limit"), { fallback: 500, min: 1, max: 1000 });
 
   // Fetch locations, organizations, and services from D1
   const [locResult, orgResult, svcResult, addrResult] = await Promise.all([

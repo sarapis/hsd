@@ -6,12 +6,11 @@
  */
 import { Hono } from "hono";
 import type { Env } from "../env";
-import { searchServices } from "../db/queries";
+import { searchServices, resolveRecordId } from "../db/queries";
 import {
-  mapServiceSummary, mapService, mapOrganizationSummary, mapOrganization,
-  mapLocation, mapAddress, mapPhone, mapContact, mapLanguage,
-  mapServiceAtLocation, paginate, toUuid,
+  mapServiceSummary, mapService, mapOrganizationSummary, mapOrganization, mapLocation, mapAddress, mapPhone, mapContact, mapLanguage, mapServiceAtLocation, paginate,
 } from "../mapper";
+import { parsePage, parsePerPage } from "../utils/pagination";
 
 const services = new Hono<{ Bindings: Env }>();
 
@@ -22,8 +21,8 @@ services.get("/", async (c) => {
   const db = c.env.DB;
   const publishedStatus = c.env.PUBLISHED_STATUS_VALUE;
 
-  const page = Math.max(1, Number(c.req.query("page") ?? 1));
-  const perPage = Math.min(100, Math.max(1, Number(c.req.query("per_page") ?? 20)));
+  const page = parsePage(c.req.query("page"));
+  const perPage = parsePerPage(c.req.query("per_page"));
   const search = c.req.query("search");
   const organizationId = c.req.query("organization_id");
   const full = c.req.query("full") === "true";
@@ -136,25 +135,20 @@ services.get("/:id", async (c) => {
   const publishedStatus = c.env.PUBLISHED_STATUS_VALUE;
   const serviceId = c.req.param("id");
 
-  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(serviceId);
-
   let row = await db
     .prepare("SELECT id, airtable_id, organization_id, data FROM services WHERE id = ?1 OR airtable_id = ?1")
     .bind(serviceId)
     .first<{ id: string; airtable_id: string; organization_id: string; data: string }>();
 
-  // UUID reverse-lookup: when the validator calls /services/{uuid} using an ID
-  // from the list (which now returns UUIDs via toUuid()), scan all services and
-  // compare deterministic UUIDs until we find a match.
-  if (!row && isUuid) {
-    const { results: allRows } = await db
-      .prepare("SELECT id, airtable_id, organization_id, data FROM services")
-      .all<{ id: string; airtable_id: string; organization_id: string; data: string }>();
-    for (const candidate of allRows) {
-      if (toUuid(candidate.id) === serviceId.toLowerCase()) {
-        row = candidate;
-        break;
-      }
+  // Not a raw id — the caller is using the uuid we publish (every link in our
+  // own responses does). Resolve it against the indexed uuid column.
+  if (!row) {
+    const resolvedId = await resolveRecordId(db, "services", serviceId);
+    if (resolvedId) {
+      row = await db
+        .prepare("SELECT id, airtable_id, organization_id, data FROM services WHERE id = ?1")
+        .bind(resolvedId)
+        .first<{ id: string; airtable_id: string; organization_id: string; data: string }>();
     }
   }
 

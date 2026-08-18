@@ -5,7 +5,11 @@
  */
 import { Hono } from "hono";
 import type { Env } from "../env";
-import { mapTaxonomy, mapTaxonomyTerm, paginate, toUuid } from "../mapper";
+import {
+  mapTaxonomy, mapTaxonomyTerm, paginate,
+} from "../mapper";
+import { parsePage, parsePerPage } from "../utils/pagination";
+import { resolveRecordId } from "../db/queries";
 
 const taxonomies = new Hono<{ Bindings: Env }>();
 
@@ -15,8 +19,8 @@ const taxonomies = new Hono<{ Bindings: Env }>();
 
 taxonomies.get("/", async (c) => {
   const db = c.env.DB;
-  const page = Math.max(1, Number(c.req.query("page") ?? 1));
-  const perPage = Math.min(100, Math.max(1, Number(c.req.query("per_page") ?? 20)));
+  const page = parsePage(c.req.query("page"));
+  const perPage = parsePerPage(c.req.query("per_page"));
   const search = c.req.query("search");
 
   let query = "SELECT id, data FROM taxonomies";
@@ -45,22 +49,18 @@ taxonomies.get("/", async (c) => {
 taxonomies.get("/:id", async (c) => {
   const db = c.env.DB;
   const taxId = c.req.param("id");
-  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taxId);
-
   let row = await db
     .prepare("SELECT id, data FROM taxonomies WHERE id = ?1 OR airtable_id = ?1")
     .bind(taxId)
     .first<{ id: string; data: string }>();
 
-  if (!row && isUuid) {
-    const { results: allRows } = await db
-      .prepare("SELECT id, data FROM taxonomies")
-      .all<{ id: string; data: string }>();
-    for (const candidate of allRows) {
-      if (toUuid(candidate.id) === taxId.toLowerCase()) {
-        row = candidate;
-        break;
-      }
+  if (!row) {
+    const resolvedId = await resolveRecordId(db, "taxonomies", taxId);
+    if (resolvedId) {
+      row = await db
+        .prepare("SELECT id, data FROM taxonomies WHERE id = ?1")
+        .bind(resolvedId)
+        .first<{ id: string; data: string }>();
     }
   }
 
@@ -79,8 +79,8 @@ const taxonomyTerms = new Hono<{ Bindings: Env }>();
 
 taxonomyTerms.get("/", async (c) => {
   const db = c.env.DB;
-  const page = Math.max(1, Number(c.req.query("page") ?? 1));
-  const perPage = Math.min(100, Math.max(1, Number(c.req.query("per_page") ?? 20)));
+  const page = parsePage(c.req.query("page"));
+  const perPage = parsePerPage(c.req.query("per_page"));
   const search = c.req.query("search");
   const taxonomyId = c.req.query("taxonomy_id");
 
@@ -136,22 +136,18 @@ taxonomyTerms.get("/", async (c) => {
 taxonomyTerms.get("/:id", async (c) => {
   const db = c.env.DB;
   const termId = c.req.param("id");
-  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(termId);
-
   let row = await db
     .prepare("SELECT id, taxonomy_id, data FROM taxonomy_terms WHERE id = ?1 OR airtable_id = ?1")
     .bind(termId)
     .first<{ id: string; taxonomy_id: string; data: string }>();
 
-  if (!row && isUuid) {
-    const { results: allRows } = await db
-      .prepare("SELECT id, taxonomy_id, data FROM taxonomy_terms")
-      .all<{ id: string; taxonomy_id: string; data: string }>();
-    for (const candidate of allRows) {
-      if (toUuid(candidate.id) === termId.toLowerCase()) {
-        row = candidate;
-        break;
-      }
+  if (!row) {
+    const resolvedId = await resolveRecordId(db, "taxonomy_terms", termId);
+    if (resolvedId) {
+      row = await db
+        .prepare("SELECT id, taxonomy_id, data FROM taxonomy_terms WHERE id = ?1")
+        .bind(resolvedId)
+        .first<{ id: string; taxonomy_id: string; data: string }>();
     }
   }
 
