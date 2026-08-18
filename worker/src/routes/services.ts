@@ -103,6 +103,12 @@ services.get("/", async (c) => {
     data: string;
   }>();
 
+  // Resolve every organization on this page in one query rather than one per
+  // row — a 20-row page previously issued 20 extra sequential lookups.
+  const orgSummaries = minimal || full
+    ? new Map<string, ReturnType<typeof mapOrganizationSummary>>()
+    : await lookupOrgSummaries(db, rows.map((r) => r.organization_id));
+
   const items = [];
   for (const row of rows) {
     const data = JSON.parse(row.data) as Record<string, unknown>;
@@ -115,12 +121,7 @@ services.get("/", async (c) => {
       const service = await buildFullService(db, row.id, data, orgId);
       items.push(service);
     } else {
-      // Summary with org lookup
-      let orgSummary;
-      if (orgId !== "unknown") {
-        orgSummary = await lookupOrgSummary(db, orgId);
-      }
-      items.push(mapServiceSummary(data, orgId, orgSummary));
+      items.push(mapServiceSummary(data, orgId, orgSummaries.get(orgId)));
     }
   }
 
@@ -170,7 +171,37 @@ services.get("/:id", async (c) => {
 // Helpers
 // ============================================================================
 
-/** Look up an organization summary from D1. */
+/**
+ * Look up many organization summaries in a single query.
+ *
+ * Keyed by both `id` and `airtable_id`, because services.organization_id may
+ * hold either, and callers look up by whichever they have.
+ */
+async function lookupOrgSummaries(db: D1Database, orgIds: Array<string | null | undefined>) {
+  const summaries = new Map<string, ReturnType<typeof mapOrganizationSummary>>();
+  const unique = [...new Set(orgIds.filter((id): id is string => Boolean(id) && id !== "unknown"))];
+  if (unique.length === 0) return summaries;
+
+  // Numbered placeholders are reusable, so both IN clauses reference the same
+  // ?1..?n slots and the values are bound exactly once.
+  const placeholders = unique.map((_, i) => `?${i + 1}`).join(", ");
+  const { results } = await db
+    .prepare(
+      `SELECT id, airtable_id, data FROM organizations
+       WHERE id IN (${placeholders}) OR airtable_id IN (${placeholders})`,
+    )
+    .bind(...unique)
+    .all<{ id: string; airtable_id: string; data: string }>();
+
+  for (const row of results) {
+    const summary = mapOrganizationSummary(JSON.parse(row.data) as Record<string, unknown>);
+    summaries.set(row.id, summary);
+    if (row.airtable_id) summaries.set(row.airtable_id, summary);
+  }
+  return summaries;
+}
+
+/** Look up a single organization summary from D1. */
 async function lookupOrgSummary(db: D1Database, orgId: string) {
   const orgRow = await db
     .prepare("SELECT data FROM organizations WHERE id = ?1 OR airtable_id = ?1")

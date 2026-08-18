@@ -12,9 +12,26 @@ import { safeFloat } from "../mapper";
 
 const map = new Hono<{ Bindings: Env }>();
 
+/**
+ * How long the edge may serve this response, and for how long afterwards it may
+ * serve a stale copy while revalidating. The underlying data changes at most
+ * once per sync (every 15 minutes), so a 5-minute cache costs nothing in
+ * freshness and removes almost all of the work below.
+ */
+const MAP_CACHE_CONTROL = "public, max-age=300, stale-while-revalidate=3600";
+
 map.get("/services", async (c) => {
   const db = c.env.DB;
   const publishedStatus = c.env.PUBLISHED_STATUS_VALUE;
+
+  // This endpoint reads eight tables in full, parses every row, and resolves a
+  // location for all ~326 services before serialising ~215KB. It previously did
+  // that on every single request and returned no cache headers at all, so
+  // nothing — not the edge, not the browser — could reuse any of it.
+  const cache = caches.default;
+  const cacheKey = new Request(new URL(c.req.url).toString(), { method: "GET" });
+  const cached = await cache.match(cacheKey);
+  if (cached) return cached;
 
   // Fetch all lookup data from D1
   const svcQuery = publishedStatus
@@ -275,7 +292,13 @@ map.get("/services", async (c) => {
     })),
   };
 
-  return c.json(response);
+  const body = c.json(response);
+  body.headers.set("Cache-Control", MAP_CACHE_CONTROL);
+
+  // Store a clone; the original is still streamed to this caller. waitUntil so
+  // the write does not delay the response.
+  c.executionCtx.waitUntil(cache.put(cacheKey, body.clone()));
+  return body;
 });
 
 export { map };
