@@ -4,11 +4,16 @@
  * Inspired by PR #15's smoke test pattern — hits real endpoints to verify
  * the deployed service is alive and returning correct data shapes.
  *
- * Run: npm run test:smoke
+ * These hit the network, so they are deliberately NOT part of `npm test` —
+ * a deploy blip or an offline laptop should not turn the unit suite red.
+ * Run them explicitly against a deployed environment:
+ *
+ *   npm run test:smoke                          # production
+ *   API_URL=http://localhost:8787 npm run test:smoke   # local wrangler dev
  */
 import { describe, it, expect } from "vitest";
 
-const API_URL = process.env.API_URL || "https://hsds-api.devin-d41.workers.dev";
+const API_URL = process.env.API_URL || "https://services-api.wegov.nyc";
 
 describe("Health", () => {
   it("GET /health returns status ok", async () => {
