@@ -4,11 +4,12 @@
  * Ports airtable/sync.py. Called by the scheduled handler on cron trigger.
  * Each table sync is isolated — failures in one table don't block others.
  *
- * Incremental: compares Airtable modifiedTime against D1 updated_at to skip
- * unchanged records, dramatically reducing D1 write usage.
+ * Incremental: compares each record's content against what D1 already stores
+ * and writes only what actually differs, in batched round-trips.
  */
 import { listRecords } from "./airtable-client";
-import { upsertRecord, updateSyncMetadata } from "../db/queries";
+import { buildUpsertStatement, updateSyncMetadata } from "../db/queries";
+import { toBase64 } from "../utils/base64";
 import type { Env } from "../env";
 
 /**
@@ -118,63 +119,106 @@ function tokenize(text: string): Set<string> {
 // Incremental Sync
 // ============================================================================
 
+/** Writes per db.batch call. Keeps each round-trip well inside D1 limits. */
+const WRITE_BATCH_SIZE = 50;
+
+export interface SyncTableResult {
+  total: number;
+  written: number;
+  skipped: number;
+  /** Ids present in D1 but no longer in Airtable. */
+  orphaned: number;
+  deleted: number;
+}
+
+export interface SyncOptions {
+  /** Report what would change without writing anything. */
+  dryRun?: boolean;
+  /** Delete D1 rows whose ids are no longer present in Airtable. */
+  reconcileDeletes?: boolean;
+}
+
 /**
  * Sync a single Airtable table to D1 (incremental).
- * Compares Airtable's modifiedTime against D1's updated_at.
- * Returns { total, written, skipped }.
+ *
+ * Change detection compares the stored JSON against the incoming record rather
+ * than comparing timestamps. The previous timestamp check was inert: the client
+ * populated `lastModifiedTime` from Airtable's `createdTime` "as a proxy", and
+ * createdTime never changes, while D1's `updated_at` is stamped at insert — so
+ * `airtableTime <= d1Time` held for every existing row and edits made in
+ * Airtable never reached production. Only brand-new records were ever written.
+ *
+ * Comparing content needs no Airtable schema change, and its failure mode is
+ * safe: a key-order difference costs one redundant write, and it can never
+ * report a genuinely changed record as unchanged.
  */
 async function syncTable(
   env: Env,
   localTable: string,
   config: TableConfig,
-): Promise<{ total: number; written: number; skipped: number }> {
+  options: SyncOptions = {},
+): Promise<SyncTableResult> {
   const records = await listRecords(
     env.AIRTABLE_API_KEY,
     env.AIRTABLE_BASE_ID,
     config.airtableName,
   );
 
-  // Fetch existing updated_at timestamps for comparison
+  // Existing content, to detect what actually changed.
   const { results: existing } = await env.DB
-    .prepare(`SELECT id, updated_at FROM ${localTable}`)
-    .all<{ id: string; updated_at: string }>();
-  const existingMap = new Map(existing.map((r) => [r.id, r.updated_at]));
+    .prepare(`SELECT id, data FROM ${localTable}`)
+    .all<{ id: string; data: string }>();
+  const existingMap = new Map(existing.map((r) => [r.id, r.data]));
 
   let written = 0;
   let skipped = 0;
+  const seenIds = new Set<string>();
+  let pending: D1PreparedStatement[] = [];
+
+  const flush = async () => {
+    if (pending.length === 0) return;
+    if (!options.dryRun) await env.DB.batch(pending);
+    pending = [];
+  };
 
   for (const record of records) {
     const id = (record.fields.id as string) || record.id;
+    seenIds.add(id);
+
     const extraColumns = config.extraColumns
       ? config.extraColumns(record.fields, record.id)
       : {};
 
-    // Incremental check: skip if record hasn't been modified since last sync
-    const modifiedTime = record.lastModifiedTime;
-    const existingUpdatedAt = existingMap.get(id);
-
-    if (existingUpdatedAt && modifiedTime) {
-      const airtableTime = new Date(modifiedTime).getTime();
-      const d1Time = new Date(existingUpdatedAt).getTime();
-      if (airtableTime <= d1Time) {
-        skipped++;
-        continue;
-      }
+    const previous = existingMap.get(id);
+    if (previous !== undefined && previous === JSON.stringify(record.fields)) {
+      skipped++;
+      continue;
     }
 
-    await upsertRecord(
-      env.DB,
-      localTable,
-      id,
-      record.id,
-      record.fields,
-      extraColumns,
+    pending.push(
+      buildUpsertStatement(env.DB, localTable, id, record.id, record.fields, extraColumns),
     );
     written++;
+
+    if (pending.length >= WRITE_BATCH_SIZE) await flush();
+  }
+  await flush();
+
+  // Records removed in Airtable otherwise linger in D1 and keep being served.
+  const orphanIds = [...existingMap.keys()].filter((id) => !seenIds.has(id));
+  let deleted = 0;
+  if (options.reconcileDeletes && !options.dryRun && orphanIds.length > 0) {
+    for (let i = 0; i < orphanIds.length; i += WRITE_BATCH_SIZE) {
+      const chunk = orphanIds.slice(i, i + WRITE_BATCH_SIZE);
+      await env.DB.batch(
+        chunk.map((id) => env.DB.prepare(`DELETE FROM ${localTable} WHERE id = ?1`).bind(id)),
+      );
+      deleted += chunk.length;
+    }
   }
 
-  await updateSyncMetadata(env.DB, localTable, records.length);
-  return { total: records.length, written, skipped };
+  if (!options.dryRun) await updateSyncMetadata(env.DB, localTable, records.length);
+  return { total: records.length, written, skipped, orphaned: orphanIds.length, deleted };
 }
 
 /**
@@ -253,6 +297,12 @@ async function cacheIcons(db: D1Database): Promise<number> {
     .prepare("SELECT id, data FROM taxonomy_terms")
     .all<{ id: string; data: string }>();
 
+  // Cache ages in one query rather than one per term.
+  const { results: cacheRows } = await db
+    .prepare("SELECT category_name, cached_at FROM icon_cache")
+    .all<{ category_name: string; cached_at: string }>();
+  const cachedAtByName = new Map(cacheRows.map((r) => [r.category_name, r.cached_at]));
+
   let cached = 0;
   for (const term of terms) {
     const d = JSON.parse(term.data) as Record<string, unknown>;
@@ -263,15 +313,10 @@ async function cacheIcons(db: D1Database): Promise<number> {
       continue;
     }
 
-    // Check if we already have this icon cached
-    const existing = await db
-      .prepare("SELECT cached_at FROM icon_cache WHERE category_name = ?1")
-      .bind(name)
-      .first<{ cached_at: string }>();
-
     // Re-cache every 24 hours (Airtable URLs typically expire in 2-4 hours)
-    if (existing) {
-      const cacheAge = Date.now() - new Date(existing.cached_at).getTime();
+    const cachedAt = cachedAtByName.get(name);
+    if (cachedAt) {
+      const cacheAge = Date.now() - new Date(cachedAt).getTime();
       if (cacheAge < 24 * 60 * 60 * 1000) {
         continue; // Still fresh
       }
@@ -285,7 +330,7 @@ async function cacheIcons(db: D1Database): Promise<number> {
       }
 
       const buffer = await resp.arrayBuffer();
-      const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)));
+      const base64 = toBase64(buffer);
       const contentType = resp.headers.get("content-type") || "image/png";
 
       await db
@@ -307,28 +352,51 @@ async function cacheIcons(db: D1Database): Promise<number> {
  * Run a full sync of all tables.
  * Called by the scheduled handler.
  */
-export async function runFullSync(env: Env): Promise<Record<string, unknown>> {
+export async function runFullSync(
+  env: Env,
+  options: SyncOptions = {},
+): Promise<Record<string, unknown>> {
   const results: Record<string, unknown> = {};
+  let totalWritten = 0;
+  let totalDeleted = 0;
 
   for (const [localTable, config] of Object.entries(TABLE_MAPPING)) {
     try {
-      const { total, written, skipped } = await syncTable(env, localTable, config);
-      results[localTable] = { total, written, skipped };
-      console.log(`Synced ${localTable}: ${total} records (${written} written, ${skipped} skipped)`);
+      const result = await syncTable(env, localTable, config, options);
+      results[localTable] = result;
+      totalWritten += result.written;
+      totalDeleted += result.deleted;
+      console.log(
+        `${options.dryRun ? "[dry-run] " : ""}Synced ${localTable}: ${result.total} records ` +
+        `(${result.written} written, ${result.skipped} unchanged, ${result.orphaned} orphaned)`,
+      );
     } catch (err) {
       console.error(`Failed to sync ${localTable}:`, err);
       results[localTable] = { error: String(err) };
     }
   }
 
-  // Rebuild search tokens after sync
-  try {
-    const tokenCount = await rebuildSearchTokens(env.DB);
-    results._search_tokens = { tokens: tokenCount };
-    console.log(`Rebuilt search index: ${tokenCount} tokens`);
-  } catch (err) {
-    console.error("Failed to rebuild search tokens:", err);
-    results._search_tokens = { error: String(err) };
+  if (options.dryRun) {
+    results._dry_run = true;
+    results._would_write = totalWritten;
+    return results;
+  }
+
+  // The search index is derived entirely from services and organizations, so
+  // rebuilding it when nothing was written is pure write amplification — it ran
+  // 96 times a day regardless. The rebuild is also DELETE-then-insert, which
+  // leaves search degraded while it runs; skipping no-op syncs avoids that too.
+  if (totalWritten > 0 || totalDeleted > 0) {
+    try {
+      const tokenCount = await rebuildSearchTokens(env.DB);
+      results._search_tokens = { tokens: tokenCount };
+      console.log(`Rebuilt search index: ${tokenCount} tokens`);
+    } catch (err) {
+      console.error("Failed to rebuild search tokens:", err);
+      results._search_tokens = { error: String(err) };
+    }
+  } else {
+    results._search_tokens = { skipped: "no changes written" };
   }
 
   // Cache category icons (download from Airtable → base64 in D1)

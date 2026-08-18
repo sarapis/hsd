@@ -41,6 +41,22 @@ export async function upsertRecord(
   data: Record<string, unknown>,
   extraColumns: Record<string, string> = {},
 ): Promise<void> {
+  await db.batch([buildUpsertStatement(db, table, id, airtableId, data, extraColumns)]);
+}
+
+/**
+ * Build (but do not run) the upsert statement, so callers can group many writes
+ * into a single db.batch round-trip. The sync previously awaited one upsert per
+ * record across 17 tables, which is what pushed it into Cloudflare's CPU limit.
+ */
+export function buildUpsertStatement(
+  db: D1Database,
+  table: string,
+  id: string,
+  airtableId: string,
+  data: Record<string, unknown>,
+  extraColumns: Record<string, string> = {},
+): D1PreparedStatement {
   validateTable(table);
 
   const columns = ["id", "airtable_id", "data"];
@@ -68,7 +84,7 @@ export async function upsertRecord(
   const query = `INSERT INTO ${table} (${columnStr}) VALUES (${placeholders})
     ON CONFLICT(id) DO UPDATE SET ${updates}, updated_at=datetime('now')`;
 
-  await db.prepare(query).bind(...values).run();
+  return db.prepare(query).bind(...values);
 }
 
 /**

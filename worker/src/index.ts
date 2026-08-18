@@ -20,6 +20,7 @@ import { chat } from "./chat/handler";
 // Sync
 import { runFullSync } from "./sync/sync";
 import { toUuid } from "./mapper";
+import { toBase64 } from "./utils/base64";
 
 // MCP
 import { DirectoryMcpAgent } from "./mcp/server";
@@ -171,12 +172,33 @@ app.post("/sync/trigger", async (c) => {
   const denied = requireSyncAuth(c);
   if (denied) return denied;
   const env = c.env;
+  // Deletion is opt-in: ?reconcile=true removes D1 rows no longer in Airtable.
+  const reconcileDeletes = c.req.query("reconcile") === "true";
   c.executionCtx.waitUntil(
-    runFullSync(env).then((results) => {
+    runFullSync(env, { reconcileDeletes }).then((results) => {
       console.log("Manual sync completed:", JSON.stringify(results));
     }),
   );
-  return c.json({ status: "sync_started", message: "Sync running in background. Check /sync/status for progress." });
+  return c.json({
+    status: "sync_started",
+    reconcile_deletes: reconcileDeletes,
+    message: "Sync running in background. Check /sync/status for progress.",
+  });
+});
+
+/**
+ * Report what a sync would change, without writing anything.
+ *
+ * Change detection was inert for a long time, so the first sync that actually
+ * works will land every accumulated Airtable edit at once — including status
+ * flips that unpublish records, and (with ?reconcile=true) deletions. Read this
+ * before running that sync.
+ */
+app.post("/sync/dry-run", async (c) => {
+  const denied = requireSyncAuth(c);
+  if (denied) return denied;
+  const results = await runFullSync(c.env, { dryRun: true });
+  return c.json(results);
 });
 
 // Sync a single table (for incremental seeding)
@@ -250,7 +272,7 @@ app.post("/sync/icons", async (c) => {
       }
 
       const buffer = await resp.arrayBuffer();
-      const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)));
+      const base64 = toBase64(buffer);
       const contentType = resp.headers.get("content-type") || "image/png";
 
       await db

@@ -36,20 +36,20 @@ const TABLE_IDS: Record<string, string> = {
 
 /**
  * Fetch all records from an Airtable table with pagination.
- * Returns array of { id, fields, lastModifiedTime }.
+ * Returns array of { id, fields, createdTime }.
  */
 export async function listRecords(
   apiKey: string,
   baseId: string,
   tableName: string,
   filterFormula?: string,
-): Promise<Array<{ id: string; fields: Record<string, unknown>; lastModifiedTime?: string }>> {
+): Promise<Array<{ id: string; fields: Record<string, unknown>; createdTime?: string }>> {
   const tableId = TABLE_IDS[tableName];
   if (!tableId) {
     throw new Error(`Unknown Airtable table: ${tableName}`);
   }
 
-  const records: Array<{ id: string; fields: Record<string, unknown>; lastModifiedTime?: string }> = [];
+  const records: Array<{ id: string; fields: Record<string, unknown>; createdTime?: string }> = [];
   let offset: string | undefined;
 
   while (true) {
@@ -76,14 +76,21 @@ export async function listRecords(
       offset?: string;
     };
 
-    // Map records, using createdTime as a proxy for lastModifiedTime
-    // (Airtable REST API v0 returns createdTime; for true modifiedTime
-    //  you'd need the "Last Modified" field added to the table)
+    // NOTE: Airtable REST API v0 returns only createdTime. There is no true
+    // modification timestamp unless a "Last Modified" field is added to the
+    // table and returned as a regular field.
+    //
+    // This used to be reported as `lastModifiedTime: r.createdTime` "as a
+    // proxy", and syncTable compared it against D1's updated_at to decide what
+    // to skip. Because createdTime never changes, that comparison skipped every
+    // existing record forever and Airtable edits never reached production.
+    // syncTable now detects changes by comparing stored content, so nothing
+    // pretends to be a modification time here.
     for (const r of data.records) {
       records.push({
         id: r.id,
         fields: r.fields,
-        lastModifiedTime: r.createdTime,
+        createdTime: r.createdTime,
       });
     }
 
