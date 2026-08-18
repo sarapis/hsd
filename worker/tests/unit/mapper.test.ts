@@ -59,13 +59,19 @@ describe("Utility helpers", () => {
       expect(safeInt("abc")).toBeUndefined();
     });
 
-    // CHARACTERIZATION: Number("") is 0, so an empty Airtable cell becomes 0
-    // rather than being stripped — safeFloat handles this case correctly and
-    // safeInt does not. A `minimum_age: 0` is not the same as an absent one.
-    // Phase 5 changes this to undefined; update this expectation with the fix.
-    it("returns 0 for empty string (known inconsistency with safeFloat)", () => {
-      expect(safeInt("")).toBe(0);
+    it("strips empty strings, consistently with safeFloat", () => {
+      expect(safeInt("")).toBeUndefined();
+      expect(safeInt("   ")).toBeUndefined();
       expect(safeFloat("")).toBeUndefined();
+    });
+
+    it("still parses genuine zero", () => {
+      expect(safeInt(0)).toBe(0);
+      expect(safeInt("0")).toBe(0);
+    });
+
+    it("rejects non-finite input", () => {
+      expect(safeInt("Infinity")).toBeUndefined();
     });
   });
 
@@ -169,12 +175,18 @@ describe("Utility helpers", () => {
       expect(sanitiseEmail(null)).toBeUndefined();
     });
 
-    // CHARACTERIZATION: the doc comment claims "exactly one '@'" but the check is
-    // `includes("@")`, so multi-address and malformed values pass through into
-    // HSDS output. Phase 5 tightens this to real validation.
-    it("lets multi-address and spaced values through (weaker than documented)", () => {
-      expect(sanitiseEmail("a@b.org, c@d.org")).toBe("a@b.org, c@d.org");
-      expect(sanitiseEmail("mailto:x@y.org")).toBe("mailto:x@y.org");
+    it("rejects multi-address, prefixed and malformed values", () => {
+      expect(sanitiseEmail("a@b.org, c@d.org")).toBeUndefined();
+      expect(sanitiseEmail("mailto:x@y.org")).toBeUndefined();
+      expect(sanitiseEmail("two words@example.org")).toBeUndefined();
+      expect(sanitiseEmail("a@b@c.org")).toBeUndefined();
+      expect(sanitiseEmail("no-domain-dot@localhost")).toBeUndefined();
+      expect(sanitiseEmail("@example.org")).toBeUndefined();
+    });
+
+    it("accepts ordinary real-world addresses", () => {
+      expect(sanitiseEmail("first.last+tag@sub.example.co.uk")).toBe("first.last+tag@sub.example.co.uk");
+      expect(sanitiseEmail("info@mutualaid.nyc")).toBe("info@mutualaid.nyc");
     });
   });
 

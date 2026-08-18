@@ -29,8 +29,12 @@ export function safeFloat(value: unknown): number | undefined {
 
 export function safeInt(value: unknown): number | undefined {
   if (value == null) return undefined;
+  // Number("") and Number("  ") are 0, so an empty Airtable cell used to publish
+  // `minimum_age: 0` / `year_incorporated: 0` rather than omitting the field —
+  // semantically different, and inconsistent with safeFloat, which strips them.
+  if (typeof value === "string" && value.trim() === "") return undefined;
   const n = Number(value);
-  return Number.isNaN(n) ? undefined : Math.floor(n);
+  return Number.isFinite(n) ? Math.floor(n) : undefined;
 }
 
 export function firstOrNone<T>(list: T[] | undefined | null): T | undefined {
@@ -43,16 +47,25 @@ export function joinList(list: unknown[] | undefined | null): string | undefined
 }
 
 /**
- * Return the value only if it looks like a valid email address.
- * Airtable data sometimes stores URLs in email fields — strip those.
+ * A single address: local part, one @, domain with at least one dot, and no
+ * whitespace or commas. Deliberately stricter than RFC 5322 — the goal is to
+ * keep malformed Airtable cells out of HSDS output, not to accept every
+ * technically-legal address.
+ */
+const EMAIL_RE = /^[^\s@,;:<>()[\]\\]+@[^\s@,;:<>()[\]\\]+\.[a-z]{2,}$/i;
+
+/**
+ * Return the value only if it is a single valid email address.
+ *
+ * Airtable data sometimes stores URLs in email fields. The check used to be
+ * `includes("@")` despite a comment claiming "exactly one '@'", so
+ * "a@b.org, c@d.org" and "mailto:x@y.org" both passed straight through into
+ * HSDS output.
  */
 export function sanitiseEmail(value: unknown): string | undefined {
   if (!value) return undefined;
   const s = String(value).trim();
-  // Reject URLs and anything without exactly one '@'
-  if (s.includes("://") || s.startsWith("www.")) return undefined;
-  if (!s.includes("@")) return undefined;
-  return s;
+  return EMAIL_RE.test(s) ? s : undefined;
 }
 
 /** Schemes allowed to pass through to an href. */
@@ -94,57 +107,23 @@ export function normaliseStatus(status: unknown): string {
   return "active"; // safe default
 }
 
-// Fixed namespace UUID for deterministic mapping (UUID v5 using SHA-1)
-// All Airtable record IDs are namespaced under this fixed UUID.
-const AIRTABLE_NAMESPACE = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"; // UUID v4 namespace (URL)
-
 /**
- * Convert an Airtable record ID (e.g. "recXXXXXXXXXXXX") to a deterministic
- * UUID v5. The HSDS-UK 3.0 spec requires all `id` fields to be in UUID format.
+ * Map an Airtable record id to a stable uuid-shaped string.
  *
- * Uses SubtleCrypto SHA-1 to generate a stable UUID that is the same for the
- * same input every time, so cross-references between services, orgs, and
- * locations remain consistent.
+ * NOT UUID v5, despite what this file used to claim: it is an XOR-fold of the
+ * id's bytes with the version and variant nibbles overwritten, so ids differing
+ * only in the bits those nibbles occupy collide, and the output near-plaintext
+ * embeds its input (toUuid("org-1") begins 6a72672d-3100, ASCII "jrg-1").
+ *
+ * It is kept anyway, deliberately: every id this API has ever published derives
+ * from it, so changing the algorithm would break every service and organization
+ * URL and every stored reference at once. A correct SHA-1 v5 implementation sat
+ * unused beside this one and has been deleted rather than left as a trap. The
+ * UNIQUE index on each uuid column makes any real collision fail loudly at sync
+ * time instead of silently resolving a lookup to the wrong record.
+ *
+ * Replacing it is a versioned-migration decision, not a refactor.
  */
-const _uuidCache = new Map<string, string>();
-
-async function airtableIdToUuid(id: string): Promise<string> {
-  if (!id) return "00000000-0000-0000-0000-000000000000";
-
-  // Return already-valid UUIDs unchanged
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
-    return id.toLowerCase();
-  }
-
-  const cached = _uuidCache.get(id);
-  if (cached) return cached;
-
-  // UUID v5: SHA-1 of (namespace bytes + name bytes), formatted as UUID
-  const nsHex = AIRTABLE_NAMESPACE.replace(/-/g, "");
-  const nsBytes = new Uint8Array(16);
-  for (let i = 0; i < 16; i++) nsBytes[i] = parseInt(nsHex.slice(i * 2, i * 2 + 2), 16);
-
-  const nameBytes = new TextEncoder().encode(id);
-  const combined = new Uint8Array(nsBytes.length + nameBytes.length);
-  combined.set(nsBytes);
-  combined.set(nameBytes, nsBytes.length);
-
-  const hashBuffer = await crypto.subtle.digest("SHA-1", combined);
-  const h = new Uint8Array(hashBuffer);
-
-  // Set version (5) and variant bits per RFC 4122
-  h[6] = (h[6] & 0x0f) | 0x50; // version 5
-  h[8] = (h[8] & 0x3f) | 0x80; // variant 10xx
-
-  const hex = Array.from(h.slice(0, 16)).map(b => b.toString(16).padStart(2, "0")).join("");
-  const uuid = `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
-
-  _uuidCache.set(id, uuid);
-  return uuid;
-}
-
-/** Synchronous UUID mapping via a pre-computed XOR-fold of the Airtable ID bytes.
- * Deterministic and fast — no async needed. */
 export function toUuid(id: string): string {
   if (!id) return "00000000-0000-0000-0000-000000000000";
 

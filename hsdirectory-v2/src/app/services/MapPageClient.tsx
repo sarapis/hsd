@@ -15,14 +15,22 @@ const BOROUGH_MAP: Record<string, string[]> = {
 };
 const BOROUGHS = Object.keys(BOROUGH_MAP);
 
-/** Extract the city/borough from a formatted address string ("street, city, state, zip"). */
+/**
+ * Extract the borough from a formatted address string.
+ *
+ * The API assembles addresses as "street, city, state, zip", so the city was
+ * read from parts[1]. But any comma inside the street line — "123 Main St,
+ * Suite 4, Brooklyn, NY" — shifts every field along, leaving parts[1] as
+ * "Suite 4" and silently excluding the service from borough filtering. Match
+ * any component instead; borough names are distinctive enough not to collide
+ * with street or state fields.
+ */
 function extractBorough(address?: string): string | null {
     if (!address) return null;
-    const parts = address.split(',').map(p => p.trim());
+    const parts = address.split(',').map(p => p.trim().toLowerCase()).filter(Boolean);
     if (parts.length < 2) return null;
-    const city = parts[1];
     for (const [borough, cities] of Object.entries(BOROUGH_MAP)) {
-        if (cities.some(c => c.toLowerCase() === city.toLowerCase())) return borough;
+        if (parts.some(part => cities.some(c => c.toLowerCase() === part))) return borough;
     }
     return null;
 }
