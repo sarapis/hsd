@@ -195,17 +195,27 @@ describe("Utility helpers", () => {
       expect(normaliseUrl(null)).toBeUndefined();
     });
 
-    // CHARACTERIZATION: a value containing no dot is returned verbatim, so a
-    // `javascript:` payload survives intact and is rendered straight into an
-    // href — React does not strip those. Phase 2 adds a scheme allowlist and
-    // this expectation becomes undefined.
-    it("returns dotless values unchanged, including dangerous schemes", () => {
-      expect(normaliseUrl("javascript:alert(1)")).toBe("javascript:alert(1)");
+    it("drops schemes outside the allowlist", () => {
+      // React does not strip these from an href, so they must not survive mapping.
+      expect(normaliseUrl("javascript:alert(1)")).toBeUndefined();
+      expect(normaliseUrl("JavaScript:alert(1)")).toBeUndefined();
+      expect(normaliseUrl("data:text/html;base64,PHNjcmlwdD4=")).toBeUndefined();
+      expect(normaliseUrl("vbscript:msgbox(1)")).toBeUndefined();
     });
 
-    // CHARACTERIZATION: any dot-containing string is treated as a domain, so
-    // prose and email addresses become nonsense urls. Phase 5 validates properly.
-    it("turns dot-containing prose into a url", () => {
+    it("keeps mailto and tel", () => {
+      expect(normaliseUrl("mailto:help@example.org")).toBe("mailto:help@example.org");
+      expect(normaliseUrl("tel:+12125551234")).toBe("tel:+12125551234");
+    });
+
+    it("drops dotless values that are not urls", () => {
+      expect(normaliseUrl("call the office")).toBeUndefined();
+    });
+
+    // CHARACTERIZATION: any remaining dot-containing string is still treated as
+    // a domain, so prose and bare addresses become nonsense urls. Phase 5
+    // replaces this with real validation.
+    it("still turns dot-containing prose into a url", () => {
       expect(normaliseUrl("See site.com for info")).toBe("https://See site.com for info");
       expect(normaliseUrl("foo@bar.com")).toBe("https://foo@bar.com");
     });

@@ -67,3 +67,10 @@ hsdirectory-v2/.vercel/
 hsdirectory-v2/.env.local
 
 .vercel
+
+# Cloudflare Wrangler local secrets (SYNC_SECRET, AIRTABLE_API_KEY, ...)
+.dev.vars
+.dev.vars.*
+**/.dev.vars
+**/.dev.vars.*
+!.dev.vars.example

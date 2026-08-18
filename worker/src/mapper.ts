@@ -55,18 +55,32 @@ export function sanitiseEmail(value: unknown): string | undefined {
   return s;
 }
 
+/** Schemes allowed to pass through to an href. */
+const SAFE_SCHEME = /^(?:https?|mailto|tel):/i;
+
+/** Any explicit "scheme:" prefix, safe or not. */
+const ANY_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+
 /**
  * Ensure a URL value has a valid scheme prefix.
  * Bare "www.example.com" fails the HSDS-UK 'uri' format check.
+ *
+ * Values reach an <a href> in the frontend, and React does not strip dangerous
+ * schemes — it only warns in development. A dotless value used to be returned
+ * verbatim, so `javascript:alert(1)` in an Airtable url field survived intact
+ * all the way to a clickable link. Anything carrying a scheme outside the
+ * allowlist is now dropped.
  */
 export function normaliseUrl(value: unknown): string | undefined {
   if (!value) return undefined;
   const s = String(value).trim();
   if (!s) return undefined;
-  if (s.startsWith("http://") || s.startsWith("https://")) return s;
+  if (/^https?:\/\//i.test(s)) return s;
+  if (SAFE_SCHEME.test(s)) return s;
+  if (ANY_SCHEME.test(s)) return undefined;
   // Add https:// to bare domain or www URLs
   if (s.startsWith("www.") || s.includes(".")) return `https://${s}`;
-  return s;
+  return undefined;
 }
 
 

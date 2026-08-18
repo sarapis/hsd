@@ -40,6 +40,19 @@ app.use(
   }),
 );
 
+/**
+ * Catch-all error handler.
+ *
+ * Row JSON is parsed unguarded throughout the route layer, so one corrupt row
+ * used to surface as a bare unhandled rejection. Log the detail for operators
+ * and return a generic body — error strings can carry query fragments and
+ * internal paths.
+ */
+app.onError((err, c) => {
+  console.error(`Unhandled error on ${c.req.method} ${c.req.path}:`, err);
+  return c.json({ detail: "Internal server error" }, 500);
+});
+
 // ============================================================================
 // Routes
 // ============================================================================
@@ -125,10 +138,27 @@ app.get("/sync/status", async (c) => {
 // Sync & Admin endpoints (protected by SYNC_SECRET)
 // ============================================================================
 
-/** Guard: require SYNC_SECRET bearer token for admin endpoints. */
+/**
+ * Guard: require a SYNC_SECRET bearer token for admin endpoints.
+ *
+ * Fails CLOSED. This previously returned null when no secret was configured,
+ * treating "unconfigured" as "development mode" — so a Worker deployed without
+ * SYNC_SECRET silently offered the whole admin surface to anyone: triggering
+ * syncs, spending the Google Geocoding quota, and overwriting the coordinates
+ * behind every pin on the public map. The absence of a secret is now a refusal,
+ * not permission.
+ *
+ * For local development, set SYNC_SECRET in .dev.vars (gitignored).
+ * The scheduled cron handler does not pass through here and is unaffected.
+ */
 function requireSyncAuth(c: { req: { header: (name: string) => string | undefined }; env: Env; json: (body: unknown, status?: number) => Response }): Response | null {
   const secret = c.env.SYNC_SECRET;
-  if (!secret) return null; // No secret configured → open (dev mode)
+  if (!secret) {
+    return c.json(
+      { error: "Admin endpoints are disabled because SYNC_SECRET is not configured." },
+      503,
+    );
+  }
   const auth = c.req.header("Authorization");
   if (auth !== `Bearer ${secret}`) {
     return c.json({ error: "Unauthorized" }, 401);
@@ -160,7 +190,8 @@ app.post("/sync/table/:table", async (c) => {
     const count = await syncSingleTable(env, tableName);
     return c.json({ status: "completed", table: tableName, records: count });
   } catch (err) {
-    return c.json({ status: "error", table: tableName, error: String(err) }, 500);
+    console.error(`Sync failed for table ${tableName}:`, err);
+    return c.json({ status: "error", table: tableName, detail: "Sync failed; see Worker logs." }, 500);
   }
 });
 
