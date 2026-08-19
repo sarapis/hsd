@@ -12,6 +12,24 @@ import { mapServiceSummary } from "../mapper";
 
 const chat = new Hono<{ Bindings: Env }>();
 
+/**
+ * Input bounds for the chat endpoint.
+ *
+ * This route is unauthenticated, CORS-open, and runs a billed 70B model, so a
+ * request costs the account real money and several seconds of inference while
+ * costing the caller nothing. Rate limiting belongs at the edge (a Cloudflare
+ * rule on /api/chat), but these caps bound what a single request can spend
+ * regardless: only the last MAX_HISTORY messages ever reach the model, so
+ * without a size limit ten oversized messages inflate the bill on their own.
+ *
+ * The ceilings sit far above real usage — a chat message is typically a few
+ * hundred characters — so legitimate conversations never encounter them.
+ */
+const MAX_MESSAGES = 100;
+const MAX_MESSAGE_CHARS = 4_000;
+const MAX_TOTAL_CHARS = 12_000;
+const MAX_HISTORY = 10;
+
 /** System prompt template with grounded service data. */
 function buildSystemPrompt(services: Record<string, unknown>[]): string {
   const serviceBlock = services.length > 0
@@ -61,15 +79,40 @@ function extractSearchTerms(message: string): string[] {
 }
 
 chat.post("/", async (c) => {
-  const { messages } = (await c.req.json()) as {
-    messages: Array<{ role: string; content: string }>;
-  };
-
-  if (!messages || messages.length === 0) {
-    return c.json({ error: "No messages provided" }, 400);
+  let body: { messages?: Array<{ role?: string; content?: string }> };
+  try {
+    body = await c.req.json();
+  } catch {
+    // Previously this rejection escaped the handler and surfaced as a 500,
+    // reporting a caller mistake as a server fault.
+    return c.json({ error: "Request body must be valid JSON" }, 400);
   }
 
-  const lastMessage = messages[messages.length - 1].content;
+  const messages = body?.messages;
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return c.json({ error: "No messages provided" }, 400);
+  }
+  if (messages.length > MAX_MESSAGES) {
+    return c.json({ error: `Too many messages (limit ${MAX_MESSAGES})` }, 413);
+  }
+
+  // Only the tail is sent to the model, so bound that rather than the whole array.
+  const history = messages.slice(-MAX_HISTORY);
+  let totalChars = 0;
+  for (const m of history) {
+    if (typeof m?.content !== "string") {
+      return c.json({ error: "Each message needs a string 'content'" }, 400);
+    }
+    if (m.content.length > MAX_MESSAGE_CHARS) {
+      return c.json({ error: `Message too long (limit ${MAX_MESSAGE_CHARS} characters)` }, 413);
+    }
+    totalChars += m.content.length;
+  }
+  if (totalChars > MAX_TOTAL_CHARS) {
+    return c.json({ error: `Conversation too long (limit ${MAX_TOTAL_CHARS} characters)` }, 413);
+  }
+
+  const lastMessage = messages[messages.length - 1].content as string;
   const db = c.env.DB;
 
   // RAG Step 1: Extract terms and search D1
@@ -118,9 +161,9 @@ chat.post("/", async (c) => {
   // RAG Step 3: Stream from Workers AI
   const aiMessages = [
     { role: "system", content: systemPrompt },
-    ...messages.slice(-10).map((m) => ({
+    ...history.map((m) => ({
       role: m.role as "user" | "assistant",
-      content: m.content,
+      content: m.content as string,
     })),
   ];
 
