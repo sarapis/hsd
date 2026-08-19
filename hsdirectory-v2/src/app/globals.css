@@ -140,6 +140,46 @@ a {
   font-family: var(--font-display);
 }
 
+/* Tailwind v4 removed the preflight `cursor: pointer` on buttons, so every
+   button in the app renders with the default arrow and reads as non-interactive
+   next to controls that do show a pointer. Restore it for enabled controls. */
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]),
+summary {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+/* Select fields.
+   Native <select> chrome ignores most styling — the OS paints its own control
+   (a double-chevron stepper on macOS), so these read as unstyled next to the
+   text input and buttons beside them. Reset the appearance and supply our own
+   chevron in --muted. Horizontal padding stays in Tailwind on the element
+   (pl-3 pr-10) so nothing here competes with a utility class over the cascade. */
+.select-field {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23586069' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.75rem center;
+  background-size: 1rem 1rem;
+}
+
+.select-field:hover {
+  border-color: var(--secondary);
+}
+
+/* Remove the dotted focus outline Firefox draws inside the control. */
+.select-field:-moz-focusring {
+  color: transparent;
+  text-shadow: 0 0 0 var(--foreground);
+}
+
 .maplibregl-popup-close-button {
   font-size: 1.5rem;
   margin: 0.25rem 0.25rem 0;

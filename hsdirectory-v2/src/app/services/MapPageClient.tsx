@@ -403,7 +403,7 @@ export default function MapPageClient({
                         id="filter-need"
                         value={selectedNeed}
                         onChange={(e) => handleNeedChange(e.target.value)}
-                        className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--card-bg)] px-3 py-2 text-sm text-[var(--foreground)] focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent"
+                        className="select-field w-full rounded-lg border border-[var(--card-border)] bg-[var(--card-bg)] pl-3 pr-10 py-2 text-sm text-[var(--foreground)] focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent"
                     >
                         <option value="">All Categories</option>
                         {needCategories.map(cat => (
@@ -421,7 +421,7 @@ export default function MapPageClient({
                         id="filter-community"
                         value={selectedCommunity}
                         onChange={(e) => handleCommunityChange(e.target.value)}
-                        className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--card-bg)] px-3 py-2 text-sm text-[var(--foreground)] focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent"
+                        className="select-field w-full rounded-lg border border-[var(--card-border)] bg-[var(--card-bg)] pl-3 pr-10 py-2 text-sm text-[var(--foreground)] focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent"
                     >
                         <option value="">All Communities</option>
                         {communityCategories.map(cat => (
@@ -439,7 +439,7 @@ export default function MapPageClient({
                         id="filter-borough"
                         value={selectedBorough}
                         onChange={(e) => handleBoroughChange(e.target.value)}
-                        className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--card-bg)] px-3 py-2 text-sm text-[var(--foreground)] focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent"
+                        className="select-field w-full rounded-lg border border-[var(--card-border)] bg-[var(--card-bg)] pl-3 pr-10 py-2 text-sm text-[var(--foreground)] focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent"
                     >
                         <option value="">All Boroughs</option>
                         {BOROUGHS.map(b => (
