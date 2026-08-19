@@ -7,22 +7,26 @@ Thanks for your interest in contributing! This project bridges Airtable data to 
 To run the full stack locally for development:
 
 1. Fork the repository
-2. Clone your fork locally (`git clone https://github.com/MutualAidNYC/hsdirectory.git`)
-3. Copy `.env.example` to `.env` and add your Airtable credentials
-4. Start the backend API:
+2. Clone your fork locally (`git clone https://github.com/sarapis/hsd.git`)
+3. Start the API — a Cloudflare Worker backed by D1:
    ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install -r requirements.txt
-   uvicorn main:app --reload --port 8080
-   ```
-5. In a second terminal, start the Next.js frontend:
-   ```bash
-   cd hsdirectory
+   cd worker
    npm install
-   echo "NEXT_PUBLIC_API_URL=http://localhost:8080" > .env.local
+   cp .dev.vars.example .dev.vars   # add AIRTABLE_API_KEY and SYNC_SECRET
+   npm run db:migrate               # create the local D1 schema
+   npm run dev                      # serves on http://localhost:8787
+   ```
+4. In a second terminal, start the Next.js frontend:
+   ```bash
+   cd hsdirectory-v2
+   npm install
+   echo "NEXT_PUBLIC_API_URL=http://localhost:8787" > .env.local
    npm run dev
    ```
+
+Run `npm test` in `worker/` before opening a pull request. It is unit-only
+and needs no network. `npm run test:smoke` additionally checks a deployed
+environment, and honours `API_URL`.
 
 ## How to Contribute
 
@@ -31,7 +35,7 @@ To run the full stack locally for development:
 Open an issue with:
 - Steps to reproduce
 - Expected vs. actual behavior
-- Python version and OS
+- Browser/OS, and whether it reproduces against the API or only the frontend
 
 ### Feature Requests
 
