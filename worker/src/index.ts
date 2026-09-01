@@ -201,6 +201,22 @@ app.post("/sync/dry-run", async (c) => {
   return c.json(results);
 });
 
+/**
+ * Force a full search-index rebuild.
+ *
+ * Normal syncs now reindex only the services they touched, which assumes the
+ * existing index is correct. Use this after a bulk import, a schema change, or
+ * to recover if the index is ever suspected of drifting. It costs roughly
+ * 2 x the token count in writes, so it is deliberately manual and not on a cron.
+ */
+app.post("/sync/reindex", async (c) => {
+  const denied = requireSyncAuth(c);
+  if (denied) return denied;
+  const { reindexAllSearchTokens } = await import("./sync/sync");
+  const tokens = await reindexAllSearchTokens(c.env.DB);
+  return c.json({ status: "completed", tokens_written: tokens });
+});
+
 // Sync a single table (for incremental seeding)
 app.post("/sync/table/:table", async (c) => {
   const denied = requireSyncAuth(c);

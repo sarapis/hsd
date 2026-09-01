@@ -81,8 +81,22 @@ export function buildUpsertStatement(
     .map((col) => `${col}=excluded.${col}`)
     .join(", ");
 
+  // Guard the update so an identical row is not rewritten. D1 bills an
+  // ON CONFLICT DO UPDATE as a row written even when every value matches, and
+  // `updated_at=datetime('now')` guarantees the row always looks changed — so
+  // without this, re-upserting unchanged records costs writes for nothing.
+  //
+  // The sync already skips unchanged records before building a statement, so
+  // today this is defence in depth: it keeps that property if another caller is
+  // ever added. `IS NOT` rather than `<>` so NULLs compare correctly.
+  const changePredicate = columns
+    .filter((col) => col !== "id")
+    .map((col) => `${table}.${col} IS NOT excluded.${col}`)
+    .join(" OR ");
+
   const query = `INSERT INTO ${table} (${columnStr}) VALUES (${placeholders})
-    ON CONFLICT(id) DO UPDATE SET ${updates}, updated_at=datetime('now')`;
+    ON CONFLICT(id) DO UPDATE SET ${updates}, updated_at=datetime('now')
+    WHERE ${changePredicate}`;
 
   return db.prepare(query).bind(...values);
 }

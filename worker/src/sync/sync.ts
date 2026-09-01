@@ -129,6 +129,10 @@ export interface SyncTableResult {
   /** Ids present in D1 but no longer in Airtable. */
   orphaned: number;
   deleted: number;
+  /** Ids actually written this run — lets the search index reindex just these. */
+  changedIds: string[];
+  /** Ids removed this run, so their index entries can be dropped. */
+  deletedIds: string[];
 }
 
 export interface SyncOptions {
@@ -172,6 +176,7 @@ async function syncTable(
 
   let written = 0;
   let skipped = 0;
+  const changedIds: string[] = [];
   const seenIds = new Set<string>();
   let pending: D1PreparedStatement[] = [];
 
@@ -198,6 +203,7 @@ async function syncTable(
     pending.push(
       buildUpsertStatement(env.DB, localTable, id, record.id, record.fields, extraColumns),
     );
+    changedIds.push(id);
     written++;
 
     if (pending.length >= WRITE_BATCH_SIZE) await flush();
@@ -218,73 +224,147 @@ async function syncTable(
   }
 
   if (!options.dryRun) await updateSyncMetadata(env.DB, localTable, records.length);
-  return { total: records.length, written, skipped, orphaned: orphanIds.length, deleted };
+  return {
+    total: records.length,
+    written,
+    skipped,
+    orphaned: orphanIds.length,
+    deleted,
+    changedIds,
+    deletedIds: deleted > 0 ? orphanIds : [],
+  };
 }
 
-/**
- * Rebuild the search_tokens table from current services + organizations.
- * Called after full sync to update the search index.
- */
-async function rebuildSearchTokens(db: D1Database): Promise<number> {
-  await db.prepare("DELETE FROM search_tokens").run();
-
-  const { results: services } = await db
-    .prepare("SELECT id, organization_id, data FROM services")
-    .all<{ id: string; organization_id: string; data: string }>();
-
-  // Fetch org names for enrichment
+/** Look up organization names, used to enrich a service's tokens. */
+async function loadOrgNames(db: D1Database): Promise<Map<string, string>> {
   const { results: orgs } = await db
     .prepare("SELECT id, data FROM organizations")
     .all<{ id: string; data: string }>();
-  const orgNameMap = new Map<string, string>();
+  const map = new Map<string, string>();
   for (const org of orgs) {
     const orgData = JSON.parse(org.data) as Record<string, unknown>;
-    if (orgData.name) orgNameMap.set(org.id, String(orgData.name));
+    if (orgData.name) map.set(org.id, String(orgData.name));
   }
+  return map;
+}
 
-  let tokenCount = 0;
+/** Build the token INSERT statements for a single service row. */
+function tokenStatementsForService(
+  db: D1Database,
+  svc: { id: string; organization_id: string; data: string },
+  orgNames: Map<string, string>,
+): D1PreparedStatement[] {
+  const data = JSON.parse(svc.data) as Record<string, unknown>;
+  const nameTokens = tokenize(String(data.name || ""));
+  const descTokens = tokenize(String(data.description || ""));
+  const orgTokens = tokenize(orgNames.get(svc.organization_id) || "");
 
-  for (const svc of services) {
-    const data = JSON.parse(svc.data) as Record<string, unknown>;
-    const name = String(data.name || "");
-    const desc = String(data.description || "");
-    const orgName = orgNameMap.get(svc.organization_id) || "";
+  const insert = (token: string, source: string) =>
+    db
+      .prepare("INSERT INTO search_tokens (service_id, token, source) VALUES (?1, ?2, ?3)")
+      .bind(svc.id, token, source);
 
-    const nameTokens = tokenize(name);
-    const descTokens = tokenize(desc);
-    const orgTokens = tokenize(orgName);
+  const stmts: D1PreparedStatement[] = [];
+  for (const token of nameTokens) stmts.push(insert(token, "name"));
+  for (const token of descTokens) {
+    if (!nameTokens.has(token)) stmts.push(insert(token, "description"));
+  }
+  for (const token of orgTokens) {
+    if (!nameTokens.has(token) && !descTokens.has(token)) stmts.push(insert(token, "organization"));
+  }
+  return stmts;
+}
 
-    const stmts: D1PreparedStatement[] = [];
-    for (const token of nameTokens) {
-      stmts.push(
-        db.prepare("INSERT INTO search_tokens (service_id, token, source) VALUES (?1, ?2, 'name')")
-          .bind(svc.id, token),
-      );
-    }
-    for (const token of descTokens) {
-      if (!nameTokens.has(token)) {
-        stmts.push(
-          db.prepare("INSERT INTO search_tokens (service_id, token, source) VALUES (?1, ?2, 'description')")
-            .bind(svc.id, token),
-        );
+/**
+ * Reindex search tokens.
+ *
+ * Pass `scope` to reindex only the named services; omit it for a full rebuild.
+ *
+ * The full rebuild is DELETE-everything-then-reinsert, which costs roughly
+ * 2 x the token count in writes — about 55,000 for this dataset. It used to run
+ * whenever a sync wrote anything at all, so a single edited service triggered a
+ * complete reindex, and a handful of edits per day was enough to blow through
+ * D1's 100,000 writes/day free limit. Reindexing only the affected services
+ * turns a one-record edit into a few dozen writes instead.
+ */
+export async function reindexSearchTokens(
+  db: D1Database,
+  scope?: { serviceIds: Set<string>; removedServiceIds?: Set<string> },
+): Promise<number> {
+  const orgNames = await loadOrgNames(db);
+  let written = 0;
+
+  const insertFor = async (rows: Array<{ id: string; organization_id: string; data: string }>) => {
+    let pending: D1PreparedStatement[] = [];
+    for (const svc of rows) {
+      pending.push(...tokenStatementsForService(db, svc, orgNames));
+      if (pending.length >= 200) {
+        await db.batch(pending);
+        written += pending.length;
+        pending = [];
       }
     }
-    for (const token of orgTokens) {
-      if (!nameTokens.has(token) && !descTokens.has(token)) {
-        stmts.push(
-          db.prepare("INSERT INTO search_tokens (service_id, token, source) VALUES (?1, ?2, 'organization')")
-            .bind(svc.id, token),
-        );
-      }
+    if (pending.length > 0) {
+      await db.batch(pending);
+      written += pending.length;
     }
+  };
 
-    if (stmts.length > 0) {
-      await db.batch(stmts);
-      tokenCount += stmts.length;
-    }
+  if (!scope) {
+    await db.prepare("DELETE FROM search_tokens").run();
+    const { results } = await db
+      .prepare("SELECT id, organization_id, data FROM services")
+      .all<{ id: string; organization_id: string; data: string }>();
+    await insertFor(results);
+    return written;
   }
 
-  return tokenCount;
+  const rebuildIds = [...scope.serviceIds];
+  const touched = [...new Set([...rebuildIds, ...(scope.removedServiceIds ?? [])])];
+  if (touched.length === 0) return 0;
+
+  // Clear the old entries for every touched service (including deleted ones,
+  // whose tokens would otherwise keep matching searches).
+  for (let i = 0; i < touched.length; i += WRITE_BATCH_SIZE) {
+    const chunk = touched.slice(i, i + WRITE_BATCH_SIZE);
+    const placeholders = chunk.map((_, j) => `?${j + 1}`).join(", ");
+    await db
+      .prepare(`DELETE FROM search_tokens WHERE service_id IN (${placeholders})`)
+      .bind(...chunk)
+      .run();
+  }
+
+  for (let i = 0; i < rebuildIds.length; i += WRITE_BATCH_SIZE) {
+    const chunk = rebuildIds.slice(i, i + WRITE_BATCH_SIZE);
+    const placeholders = chunk.map((_, j) => `?${j + 1}`).join(", ");
+    const { results } = await db
+      .prepare(`SELECT id, organization_id, data FROM services WHERE id IN (${placeholders})`)
+      .bind(...chunk)
+      .all<{ id: string; organization_id: string; data: string }>();
+    await insertFor(results);
+  }
+
+  return written;
+}
+
+/** Full search-index rebuild. Exposed for recovery via POST /sync/reindex. */
+export async function reindexAllSearchTokens(db: D1Database): Promise<number> {
+  return reindexSearchTokens(db);
+}
+
+/** Services belonging to the given organizations — their tokens embed the org name. */
+async function servicesForOrganizations(db: D1Database, orgIds: string[]): Promise<string[]> {
+  const out: string[] = [];
+  for (let i = 0; i < orgIds.length; i += WRITE_BATCH_SIZE) {
+    const chunk = orgIds.slice(i, i + WRITE_BATCH_SIZE);
+    const placeholders = chunk.map((_, j) => `?${j + 1}`).join(", ");
+    const { results } = await db
+      .prepare(`SELECT id FROM services WHERE organization_id IN (${placeholders})`)
+      .bind(...chunk)
+      .all<{ id: string }>();
+    out.push(...results.map((r) => r.id));
+  }
+  return out;
 }
 
 /**
@@ -382,21 +462,51 @@ export async function runFullSync(
     return results;
   }
 
-  // The search index is derived entirely from services and organizations, so
-  // rebuilding it when nothing was written is pure write amplification — it ran
-  // 96 times a day regardless. The rebuild is also DELETE-then-insert, which
-  // leaves search degraded while it runs; skipping no-op syncs avoids that too.
-  if (totalWritten > 0 || totalDeleted > 0) {
+  // Reindex only the services this sync actually touched.
+  //
+  // The index is derived from a service's own name/description plus its
+  // organization's name, so a changed organization also invalidates the tokens
+  // of every service under it. Everything else keeps the entries it already has.
+  //
+  // This used to be a full DELETE-and-reinsert of the whole table whenever any
+  // record changed — roughly 55,000 writes to reflect a single edit, which is
+  // what exhausted D1's 100,000/day free write limit on ordinary editing days.
+  const svcResult = results.services as SyncTableResult | undefined;
+  const orgResult = results.organizations as SyncTableResult | undefined;
+
+  const affected = new Set<string>(svcResult?.changedIds ?? []);
+  const removed = new Set<string>(svcResult?.deletedIds ?? []);
+
+  if (orgResult?.changedIds?.length) {
     try {
-      const tokenCount = await rebuildSearchTokens(env.DB);
-      results._search_tokens = { tokens: tokenCount };
-      console.log(`Rebuilt search index: ${tokenCount} tokens`);
+      for (const id of await servicesForOrganizations(env.DB, orgResult.changedIds)) {
+        affected.add(id);
+      }
     } catch (err) {
-      console.error("Failed to rebuild search tokens:", err);
+      console.error("Failed to expand changed organizations to services:", err);
+    }
+  }
+
+  if (affected.size > 0 || removed.size > 0) {
+    try {
+      const tokenCount = await reindexSearchTokens(env.DB, {
+        serviceIds: affected,
+        removedServiceIds: removed,
+      });
+      results._search_tokens = {
+        reindexed_services: affected.size,
+        removed_services: removed.size,
+        tokens_written: tokenCount,
+      };
+      console.log(
+        `Reindexed ${affected.size} service(s) (${removed.size} removed): ${tokenCount} tokens written`,
+      );
+    } catch (err) {
+      console.error("Failed to reindex search tokens:", err);
       results._search_tokens = { error: String(err) };
     }
   } else {
-    results._search_tokens = { skipped: "no changes written" };
+    results._search_tokens = { skipped: "no services changed" };
   }
 
   // Cache category icons (download from Airtable → base64 in D1)
