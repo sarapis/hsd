@@ -118,14 +118,46 @@ app.all("/mcp/*", async (c) => {
 // Health / Status endpoints
 // ============================================================================
 
+/**
+ * A sync older than this means the cron has stopped landing writes.
+ * Three missed runs of the 15-minute cron, so one slow run does not page anyone.
+ */
+const SYNC_STALE_AFTER_MINUTES = 45;
+
+/**
+ * Health reflects whether the data is FRESH, not merely whether D1 is readable.
+ *
+ * This used to return "ok" whenever a COUNT(*) succeeded, so when D1's write
+ * quota blocked every sync for most of 2026-09-02, health stayed green all day
+ * while the directory quietly went stale. A stalled sync now returns 503, which
+ * is what an uptime checker needs to see.
+ */
 app.get("/health", async (c) => {
   try {
-    const result = await c.env.DB.prepare("SELECT COUNT(*) as cnt FROM services").first<{ cnt: number }>();
-    return c.json({
-      status: "ok",
-      services: result?.cnt ?? 0,
+    const [count, freshness] = await Promise.all([
+      c.env.DB.prepare("SELECT COUNT(*) as cnt FROM services").first<{ cnt: number }>(),
+      c.env.DB
+        .prepare(
+          "SELECT MAX(last_sync) AS last_sync, (julianday('now') - julianday(MAX(last_sync))) * 1440 AS age_minutes FROM sync_metadata",
+        )
+        .first<{ last_sync: string | null; age_minutes: number | null }>(),
+    ]);
+
+    const ageMinutes = freshness?.age_minutes ?? null;
+    const stale = ageMinutes === null || ageMinutes > SYNC_STALE_AFTER_MINUTES;
+    const body = {
+      status: stale ? "degraded" : "ok",
+      services: count?.cnt ?? 0,
+      last_sync: freshness?.last_sync ?? null,
+      sync_age_minutes: ageMinutes === null ? null : Math.round(ageMinutes),
       timestamp: new Date().toISOString(),
-    });
+      ...(stale && {
+        message: ageMinutes === null
+          ? "No sync has ever completed."
+          : `Last successful sync was ${Math.round(ageMinutes)} minutes ago (threshold ${SYNC_STALE_AFTER_MINUTES}).`,
+      }),
+    };
+    return c.json(body, stale ? 503 : 200);
   } catch {
     return c.json({ status: "error", message: "Database unavailable" }, 503);
   }
