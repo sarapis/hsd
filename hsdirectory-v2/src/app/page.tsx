@@ -52,24 +52,23 @@ const EXCLUDED_TERMS = new Set(["-Not Listed", "Not Listed"]);
  * Homepage with warm community-oriented design inspired by mutualaid.nyc.
  */
 export default async function Home() {
-  let stats = { resources: 0, groups: 0 };
-  let categories: { name: string; icon?: string | null }[] = [];
-
-  try {
-    const [servicesRes, orgsRes, mapData] = await Promise.all([
-      getServices(1, 1),
-      getOrganizations(1, 1),
-      getMapServices(),
-    ]);
-    stats = {
-      resources: servicesRes.total_items || 0,
-      groups: orgsRes.total_items || 0,
-    };
-    categories = (mapData.needCategories || [])
-    .filter((c: any) => !EXCLUDED_TERMS.has(c.name));
-  } catch (error) {
-    console.error("Failed to fetch homepage data:", error);
-  }
+  // No try/catch here, deliberately. This used to swallow API errors and
+  // render the zero defaults — "Search our directory of 0 resources from 0
+  // groups" with an empty category grid — which reads as an empty directory,
+  // not an outage. Worse, the render then succeeded, so ISR cached the zeros as
+  // a good page. Letting the error propagate means Next keeps serving the last
+  // successful render, and falls back to app/error.tsx when there is none.
+  const [servicesRes, orgsRes, mapData] = await Promise.all([
+    getServices(1, 1),
+    getOrganizations(1, 1),
+    getMapServices(),
+  ]);
+  const stats = {
+    resources: servicesRes.total_items || 0,
+    groups: orgsRes.total_items || 0,
+  };
+  const categories: { name: string; icon?: string | null }[] = (mapData.needCategories || [])
+    .filter((c: { name: string }) => !EXCLUDED_TERMS.has(c.name));
 
   return (
     <div className="flex flex-col">
