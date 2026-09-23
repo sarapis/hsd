@@ -1,0 +1,44 @@
+# Runs the checks that exist locally but were never enforced. Before this,
+# the worker's unit suite, and both typechecks, ran only when someone
+# remembered — which is how a sync defect that exhausted D1's write quota
+# shipped with every test green.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  worker:
+    name: Worker — tests and typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npx tsc --noEmit
+
+  frontend:
+    name: Frontend — typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hsdirectory-v2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: hsdirectory-v2/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
