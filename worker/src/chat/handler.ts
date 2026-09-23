@@ -103,6 +103,12 @@ chat.post("/", async (c) => {
     if (typeof m?.content !== "string") {
       return c.json({ error: "Each message needs a string 'content'" }, 400);
     }
+    // The client's role used to be cast straight through, so a caller could
+    // send role:"system" and sit its own instructions beside the grounding
+    // prompt. Only the server writes the system message.
+    if (m.role !== "user" && m.role !== "assistant") {
+      return c.json({ error: "Message role must be 'user' or 'assistant'" }, 400);
+    }
     if (m.content.length > MAX_MESSAGE_CHARS) {
       return c.json({ error: `Message too long (limit ${MAX_MESSAGE_CHARS} characters)` }, 413);
     }
@@ -162,7 +168,7 @@ chat.post("/", async (c) => {
   const aiMessages = [
     { role: "system", content: systemPrompt },
     ...history.map((m) => ({
-      role: m.role as "user" | "assistant",
+      role: m.role as "user" | "assistant", // validated above
       content: m.content as string,
     })),
   ];
