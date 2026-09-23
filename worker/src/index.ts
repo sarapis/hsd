@@ -19,6 +19,7 @@ import { chat } from "./chat/handler";
 
 // Sync
 import { runFullSync } from "./sync/sync";
+import { listRecords } from "./sync/airtable-client";
 import { toUuid } from "./mapper";
 import { toBase64 } from "./utils/base64";
 
@@ -245,10 +246,11 @@ app.post("/sync/icons", async (c) => {
   const db = c.env.DB;
   const BATCH_SIZE = 5;
 
-  // Get all taxonomy terms with icon URLs
-  const { results: terms } = await db
-    .prepare("SELECT id, data FROM taxonomy_terms")
-    .all<{ id: string; data: string }>();
+  // Fetch terms fresh from Airtable rather than reading stored rows: the sync
+  // no longer rewrites a row just because Airtable re-signed its attachment
+  // URL, so a stored URL may already have expired.
+  const fresh = await listRecords(c.env.AIRTABLE_API_KEY, c.env.AIRTABLE_BASE_ID, "taxonomy_terms");
+  const terms = fresh.map((r) => ({ id: r.id, data: JSON.stringify(r.fields) }));
 
   const toCache: Array<{ name: string; url: string }> = [];
   for (const term of terms) {

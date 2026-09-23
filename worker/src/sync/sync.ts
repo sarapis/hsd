@@ -122,6 +122,98 @@ function tokenize(text: string): Set<string> {
 /** Writes per db.batch call. Keeps each round-trip well inside D1 limits. */
 const WRITE_BATCH_SIZE = 50;
 
+type AirtableRecord = { id: string; fields: Record<string, unknown>; createdTime?: string };
+
+/**
+ * A record's content, minus anything Airtable changes without anyone editing.
+ *
+ * Attachment objects carry signed `url`s (and `thumbnails`) that Airtable
+ * re-signs every few hours, so comparing raw payloads made every icon-bearing
+ * row look edited each time its URL rotated. Attachments are reduced to their
+ * stable identity (id, filename, size, type), and object keys are sorted so a
+ * reordered payload is not mistaken for an edit either.
+ */
+export function contentFingerprint(fields: Record<string, unknown>): string {
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === "object") {
+      const obj = value as Record<string, unknown>;
+      if (typeof obj.id === "string" && typeof obj.filename === "string") {
+        return { filename: obj.filename, id: obj.id, size: obj.size, type: obj.type };
+      }
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(obj).sort()) out[key] = canonical(obj[key]);
+      return out;
+    }
+    return value;
+  };
+  return JSON.stringify(canonical(fields));
+}
+
+export interface RecordDiff {
+  /** Records whose content genuinely changed, or that are new. */
+  toWrite: Array<{ id: string; record: AirtableRecord }>;
+  /** Ids of new records, or records whose `name` changed. */
+  renamedIds: string[];
+  seenIds: Set<string>;
+  skipped: number;
+}
+
+/**
+ * Decide which incoming records need writing.
+ *
+ * The fast path is an exact string match against what D1 stores, which covers
+ * the overwhelming majority of rows at no parsing cost. Only rows whose raw
+ * payload differs fall through to the fingerprint comparison — so the extra
+ * CPU is proportional to what actually moved, which matters under the Workers
+ * free-tier CPU limit.
+ */
+export function diffRecords(
+  records: AirtableRecord[],
+  existing: Map<string, string>,
+): RecordDiff {
+  const toWrite: RecordDiff["toWrite"] = [];
+  const renamedIds: string[] = [];
+  const seenIds = new Set<string>();
+  let skipped = 0;
+
+  for (const record of records) {
+    const id = (record.fields.id as string) || record.id;
+    seenIds.add(id);
+
+    const previous = existing.get(id);
+    if (previous === undefined) {
+      toWrite.push({ id, record });
+      renamedIds.push(id);
+      continue;
+    }
+    if (previous === JSON.stringify(record.fields)) {
+      skipped++;
+      continue;
+    }
+
+    let prior: Record<string, unknown>;
+    try {
+      prior = JSON.parse(previous) as Record<string, unknown>;
+    } catch {
+      // Unreadable stored row: rewrite it rather than trust it.
+      toWrite.push({ id, record });
+      renamedIds.push(id);
+      continue;
+    }
+
+    if (contentFingerprint(prior) === contentFingerprint(record.fields)) {
+      skipped++;
+      continue;
+    }
+
+    toWrite.push({ id, record });
+    if (prior.name !== record.fields.name) renamedIds.push(id);
+  }
+
+  return { toWrite, renamedIds, seenIds, skipped };
+}
+
 export interface SyncTableResult {
   total: number;
   written: number;
@@ -131,6 +223,9 @@ export interface SyncTableResult {
   deleted: number;
   /** Ids actually written this run — lets the search index reindex just these. */
   changedIds: string[];
+  /** Ids that are new or whose `name` changed. Organizations use this: a
+   *  service's tokens embed its organization's name and nothing else from it. */
+  renamedIds: string[];
   /** Ids removed this run, so their index entries can be dropped. */
   deletedIds: string[];
 }
@@ -161,6 +256,7 @@ async function syncTable(
   localTable: string,
   config: TableConfig,
   options: SyncOptions = {},
+  onRecords?: (records: AirtableRecord[]) => void,
 ): Promise<SyncTableResult> {
   const records = await listRecords(
     env.AIRTABLE_API_KEY,
@@ -173,11 +269,11 @@ async function syncTable(
     .prepare(`SELECT id, data FROM ${localTable}`)
     .all<{ id: string; data: string }>();
   const existingMap = new Map(existing.map((r) => [r.id, r.data]));
+  onRecords?.(records);
 
+  const { toWrite, renamedIds, seenIds, skipped } = diffRecords(records, existingMap);
   let written = 0;
-  let skipped = 0;
   const changedIds: string[] = [];
-  const seenIds = new Set<string>();
   let pending: D1PreparedStatement[] = [];
 
   const flush = async () => {
@@ -186,19 +282,10 @@ async function syncTable(
     pending = [];
   };
 
-  for (const record of records) {
-    const id = (record.fields.id as string) || record.id;
-    seenIds.add(id);
-
+  for (const { id, record } of toWrite) {
     const extraColumns = config.extraColumns
       ? config.extraColumns(record.fields, record.id)
       : {};
-
-    const previous = existingMap.get(id);
-    if (previous !== undefined && previous === JSON.stringify(record.fields)) {
-      skipped++;
-      continue;
-    }
 
     pending.push(
       buildUpsertStatement(env.DB, localTable, id, record.id, record.fields, extraColumns),
@@ -231,6 +318,7 @@ async function syncTable(
     orphaned: orphanIds.length,
     deleted,
     changedIds,
+    renamedIds,
     deletedIds: deleted > 0 ? orphanIds : [],
   };
 }
@@ -347,6 +435,34 @@ export async function reindexSearchTokens(
   return written;
 }
 
+/**
+ * Which services need their search tokens rebuilt after a sync.
+ *
+ * A service's tokens come from its own name and description plus its
+ * organization's NAME — nothing else about the organization. So only renamed,
+ * new, or deleted organizations invalidate their services. This used to expand
+ * on ANY organization change: editing an org's phone number reindexed every
+ * service under it, and a bulk Airtable edit touching 261 orgs reindexed all
+ * 680 services in one run. Three of those in a day pushed D1 past its
+ * 100,000 writes/day free limit (132,550 on 2026-09-02).
+ */
+export async function computeReindexScope(
+  db: D1Database,
+  services?: Pick<SyncTableResult, "changedIds" | "deletedIds">,
+  organizations?: Pick<SyncTableResult, "renamedIds" | "deletedIds">,
+): Promise<{ serviceIds: Set<string>; removedServiceIds: Set<string> }> {
+  const serviceIds = new Set<string>(services?.changedIds ?? []);
+  const removedServiceIds = new Set<string>(services?.deletedIds ?? []);
+
+  const orgIds = [...(organizations?.renamedIds ?? []), ...(organizations?.deletedIds ?? [])];
+  if (orgIds.length > 0) {
+    for (const id of await servicesForOrganizations(db, orgIds)) {
+      if (!removedServiceIds.has(id)) serviceIds.add(id);
+    }
+  }
+  return { serviceIds, removedServiceIds };
+}
+
 /** Full search-index rebuild. Exposed for recovery via POST /sync/reindex. */
 export async function reindexAllSearchTokens(db: D1Database): Promise<number> {
   return reindexSearchTokens(db);
@@ -372,10 +488,12 @@ async function servicesForOrganizations(db: D1Database, orgIds: string[]): Promi
  * Airtable signed URLs expire after a few hours — this stores the actual
  * image data in D1 so the Worker can serve them indefinitely.
  */
-async function cacheIcons(db: D1Database): Promise<number> {
-  const { results: terms } = await db
-    .prepare("SELECT id, data FROM taxonomy_terms")
-    .all<{ id: string; data: string }>();
+export async function cacheIcons(db: D1Database, fresh?: AirtableRecord[]): Promise<number> {
+  // Stored rows are a fallback only: once rotated URLs stop counting as edits,
+  // a stored attachment URL can be days old and already expired.
+  const terms: Array<{ id: string; data: string }> = fresh
+    ? fresh.map((r) => ({ id: r.id, data: JSON.stringify(r.fields) }))
+    : (await db.prepare("SELECT id, data FROM taxonomy_terms").all<{ id: string; data: string }>()).results;
 
   // Cache ages in one query rather than one per term.
   const { results: cacheRows } = await db
@@ -440,9 +558,17 @@ export async function runFullSync(
   let totalWritten = 0;
   let totalDeleted = 0;
 
+  // Icon caching needs the attachment URLs from THIS fetch: stored rows keep
+  // whatever URL they were last written with, and Airtable's signed URLs expire
+  // within hours. Kept out of `results` because the scheduled handler logs it.
+  let freshTaxonomyTerms: AirtableRecord[] | undefined;
+
   for (const [localTable, config] of Object.entries(TABLE_MAPPING)) {
     try {
-      const result = await syncTable(env, localTable, config, options);
+      const capture = localTable === "taxonomy_terms"
+        ? (records: AirtableRecord[]) => { freshTaxonomyTerms = records; }
+        : undefined;
+      const result = await syncTable(env, localTable, config, options, capture);
       results[localTable] = result;
       totalWritten += result.written;
       totalDeleted += result.deleted;
@@ -462,29 +588,19 @@ export async function runFullSync(
     return results;
   }
 
-  // Reindex only the services this sync actually touched.
-  //
-  // The index is derived from a service's own name/description plus its
-  // organization's name, so a changed organization also invalidates the tokens
-  // of every service under it. Everything else keeps the entries it already has.
-  //
-  // This used to be a full DELETE-and-reinsert of the whole table whenever any
-  // record changed — roughly 55,000 writes to reflect a single edit, which is
-  // what exhausted D1's 100,000/day free write limit on ordinary editing days.
-  const svcResult = results.services as SyncTableResult | undefined;
-  const orgResult = results.organizations as SyncTableResult | undefined;
-
-  const affected = new Set<string>(svcResult?.changedIds ?? []);
-  const removed = new Set<string>(svcResult?.deletedIds ?? []);
-
-  if (orgResult?.changedIds?.length) {
-    try {
-      for (const id of await servicesForOrganizations(env.DB, orgResult.changedIds)) {
-        affected.add(id);
-      }
-    } catch (err) {
-      console.error("Failed to expand changed organizations to services:", err);
-    }
+  // Reindex only the services this sync actually touched (see computeReindexScope).
+  let affected = new Set<string>();
+  let removed = new Set<string>();
+  try {
+    const scope = await computeReindexScope(
+      env.DB,
+      results.services as SyncTableResult | undefined,
+      results.organizations as SyncTableResult | undefined,
+    );
+    affected = scope.serviceIds;
+    removed = scope.removedServiceIds;
+  } catch (err) {
+    console.error("Failed to compute reindex scope:", err);
   }
 
   if (affected.size > 0 || removed.size > 0) {
@@ -511,7 +627,7 @@ export async function runFullSync(
 
   // Cache category icons (download from Airtable → base64 in D1)
   try {
-    const iconCount = await cacheIcons(env.DB);
+    const iconCount = await cacheIcons(env.DB, freshTaxonomyTerms);
     results._icons = { cached: iconCount };
     if (iconCount > 0) console.log(`Cached ${iconCount} category icons`);
   } catch (err) {
