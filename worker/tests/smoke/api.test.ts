@@ -16,13 +16,29 @@ import { describe, it, expect } from "vitest";
 const API_URL = process.env.API_URL || "https://services-api.wegov.nyc";
 
 describe("Health", () => {
-  it("GET /health returns status ok", async () => {
+  // Two separate claims, deliberately. /health returns 503 "degraded" when the
+  // sync has stalled — that is the endpoint working, not the deploy failing.
+  // So "is the service up and answering correctly" and "is the data fresh"
+  // must be able to fail independently, each with an honest name.
+
+  it("GET /health answers with a well-formed health report", async () => {
     const res = await fetch(`${API_URL}/health`);
-    expect(res.status).toBe(200);
+    expect([200, 503]).toContain(res.status);
     const data = await res.json() as Record<string, unknown>;
-    expect(data.status).toBe("ok");
+    expect(["ok", "degraded"]).toContain(data.status);
+    expect(res.status === 200).toBe(data.status === "ok");
     expect(typeof data.services).toBe("number");
     expect((data.services as number)).toBeGreaterThan(0);
+    expect(data).toHaveProperty("last_sync");
+    expect(data).toHaveProperty("sync_age_minutes");
+  });
+
+  it("GET /health reports the Airtable sync as fresh", async () => {
+    const res = await fetch(`${API_URL}/health`);
+    const data = await res.json() as Record<string, unknown>;
+    // Failing here means the data is stale — the cron is not landing writes —
+    // not that the deploy is broken. The message says how stale.
+    expect(data.status, String(data.message ?? "")).toBe("ok");
   });
 });
 
@@ -89,6 +105,8 @@ describe("Map", () => {
     const res = await fetch(`${API_URL}/map/services`);
     const data = await res.json() as { needCategories: Array<{ name: string; icon?: string }> };
     const withIcons = data.needCategories.filter((c) => c.icon);
+    // Without this the loop below passes vacuously when no category has an icon.
+    expect(withIcons.length).toBeGreaterThan(0);
     // Icons should point to our Worker, not Airtable
     for (const cat of withIcons) {
       expect(cat.icon).toContain("/icons/");
