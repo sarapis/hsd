@@ -1,0 +1,49 @@
+# Production health — runs in GitHub's cloud, so it needs no Mac, no Claude
+# session and no Cloudflare login. GitHub emails whoever last edited the cron
+# schedule below when a scheduled run fails.
+#
+# The API check reads /health, which returns 503 "degraded" once the Airtable
+# sync is more than 45 minutes stale. That is the user-visible symptom of the
+# D1 write quota running out, and of any other sync failure (Airtable down, a
+# bad deploy), so this one check covers the failure that went unnoticed for
+# weeks in September 2026. Worst case, a stall is reported ~75 minutes after
+# the last good sync: the 45-minute threshold plus one 30-minute interval.
+#
+# Note: GitHub disables scheduled workflows in a public repo after 60 days
+# without a commit. If alerts stop arriving, check the Actions tab first.
+name: Production health
+
+on:
+  schedule:
+    # Every 30 minutes, off the hour: GitHub delays top-of-the-hour schedules
+    # under load.
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-health
+  cancel-in-progress: false
+
+jobs:
+  api:
+    name: API sync is fresh
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+      - run: .github/scripts/check-endpoint.sh https://services-api.wegov.nyc/health health
+
+  frontend:
+    name: Frontend is up
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+      - run: .github/scripts/check-endpoint.sh https://services.wegov.nyc/
